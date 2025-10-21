@@ -1,5 +1,6 @@
 import {
-  GoogleGenerativeAI as GoogleGenAI
+  GoogleGenAI,
+  Chat
 } from "@google/genai";
 import {
   marked
@@ -67,7 +68,7 @@ The content provided by *Friendly MBBS AI* is for general knowledge, information
 `;
 
 let ai;
-let chat;
+let chat: Chat;
 
 let isRecording = false;
 let recognition;
@@ -188,11 +189,11 @@ async function initChat() {
     ai = new GoogleGenAI({
       apiKey: process.env.API_KEY
     });
-    const model = ai.getGenerativeModel({
-      model: "gemini-1.5-flash"
-    });
-    chat = model.startChat({
-      systemInstruction: SYSTEM_INSTRUCTION,
+    chat = ai.chats.create({
+      model: "gemini-2.5-flash",
+      config: {
+        systemInstruction: SYSTEM_INSTRUCTION,
+      },
       history: [],
     });
 
@@ -241,10 +242,12 @@ async function sendMessage() {
   let messageElement = null;
 
   try {
-    const result = await chat.sendMessageStream(parts);
+    const resultStream = await chat.sendMessageStream({
+      message: parts
+    });
 
-    for await (const chunk of result.stream) {
-      const chunkText = chunk.text();
+    for await (const chunk of resultStream) {
+      const chunkText = chunk.text;
       if (chunkText) {
         currentResponse += chunkText;
         if (!messageElement) {
@@ -271,7 +274,6 @@ async function sendMessage() {
       addFeedbackControls(messageElement);
     }
   } catch (error) {
-    playAudioCue('error');
     const friendlyError = getFriendlyErrorMessage(error);
     addMessage("error", `An error occurred: ${friendlyError}`);
     console.error("Error during sendMessageStream:", error);
@@ -306,6 +308,7 @@ function addMessage(role, text, isStreaming = false) {
     loadingDots.innerHTML = '<span></span><span></span><span></span>';
     messageContent.appendChild(loadingDots);
   } else if (role === 'error') {
+    playAudioCue('error');
     messageWrapper.classList.add('error-message');
     messageContent.textContent = text;
   }
@@ -619,12 +622,12 @@ function toggleMute() {
     gainNode.gain.setValueAtTime(parseFloat((volumeSlider as HTMLInputElement).value), audioContext.currentTime);
     unmutedIcon.hidden = false;
     mutedIcon.hidden = true;
-    muteBtn.setAttribute('aria-label', 'Mute');
+    muteBtn.setAttribute('aria-label', 'Unmute');
   } else {
     gainNode.gain.setValueAtTime(0, audioContext.currentTime);
     unmutedIcon.hidden = true;
     mutedIcon.hidden = false;
-    muteBtn.setAttribute('aria-label', 'Unmute');
+    muteBtn.setAttribute('aria-label', 'Mute');
   }
 }
 
