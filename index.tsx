@@ -1,6 +1,7 @@
 import {
   GoogleGenAI,
-  Chat
+  Chat,
+  Modality
 } from "@google/genai";
 import {
   marked
@@ -51,7 +52,13 @@ You must use information from multimodal inputs to provide context, but apply st
 | *Photo/Camera Input* | Interpret *CLEAR TEXT ONLY (OCR)* from pill labels, medication boxes, or legible health documents. | *CRITICAL:* *DO NOT* attempt to analyze photos of physical symptoms (e.g., a rash, a wound) or unlabeled pills. Trigger *HIGH RISK* protocol for such inputs. |
 | *PDF/Docs Input* | Extract and summarize the *INDICATIONS/USES* or *SIMPLE COMPONENT LIST* from a patient leaflet. | *Refuse* to interpret complex medical charts, full medical history, or handwritten doctor notes. |
 
-*5. HARD REFUSAL & ETHICAL/LEGAL GUARDRAILS (HIGH RISK):*
+*5. Image Generation Protocol (LOW RISK):*
+- *Trigger:* User explicitly requests an image via the designated UI action.
+- *Action:* Generate safe, SFW (Safe for Work), educational, and metaphorical images strictly related to the medical and wellness fields. The style should be illustrative, abstract, or cartoonish to avoid any possibility of misinterpretation as a real medical photo or diagnosis.
+- *Examples:* "An artistic illustration of healthy lungs," "a metaphorical image representing the immune system as a shield," "a cartoon for a medical story about the importance of hand-washing," "a diagram of a balanced meal."
+- *Guardrail:* *CRITICAL: Absolutely refuse to generate any image that depicts specific medical conditions, symptoms (rashes, wounds, injuries), gore, internal organs in a realistic manner, or anything that could be misinterpreted as a diagnostic tool. Photorealistic images of medical subjects are forbidden. If the request is ambiguous or high-risk, refuse the image and respond with text using the HIGH RISK protocol.*
+
+*6. HARD REFUSAL & ETHICAL/LEGAL GUARDRAILS (HIGH RISK):*
 You must follow the *Refusal Protocol C* for all high-risk or illegal queries.
 - *Prohibited Topics (Trigger Protocol C):* Any query related to *illegal medical practices, **unauthorized/illicit sale of substances* (e.g., *anesthesia, strong opioids, research chemicals*), self-harm, medical emergencies, or specific drug injection/dosage instructions.
 
@@ -90,7 +97,8 @@ let chatContainer, chatForm, submitBtn, promptInput, sendIcon, loader,
   uploadBtn, fileUpload, filePreview, voiceBtn, micIcon, stopIcon,
   inputRow, voiceVisualizer, visualizerContainer,
   visualizerControls, muteBtn, unmutedIcon, mutedIcon, volumeSlider,
-  cameraBtn, cameraModal, cameraView, cameraCanvas, captureBtn, closeCameraBtn;
+  cameraBtn, cameraModal, cameraView, cameraCanvas, captureBtn, closeCameraBtn,
+  imageGenBtn;
 
 // --- INITIALIZATION ---
 document.addEventListener("DOMContentLoaded", () => {
@@ -121,6 +129,7 @@ document.addEventListener("DOMContentLoaded", () => {
   cameraCanvas = document.getElementById("camera-canvas");
   captureBtn = document.getElementById("capture-btn");
   closeCameraBtn = document.getElementById("close-camera-btn");
+  imageGenBtn = document.getElementById("image-gen-btn");
 
 
   // Initialize chat
@@ -163,6 +172,8 @@ function setupEventListeners() {
 
   uploadBtn.addEventListener("click", () => fileUpload.click());
   fileUpload.addEventListener("change", handleFileUpload);
+  imageGenBtn.addEventListener("click", () => sendMessage(true));
+
 
   // Camera
   cameraBtn.addEventListener("click", openCamera);
@@ -203,16 +214,27 @@ async function initChat() {
   }
 }
 
-async function sendMessage() {
+async function sendMessage(generateImage = false) {
   const prompt = promptInput.value.trim();
   const file = fileUpload.files[0];
 
   if (!prompt && !file) return;
 
   playAudioCue('send');
-  addMessage("user", prompt);
+  // Don't add user message for file-only prompts, it looks weird.
+  if (prompt) {
+    addMessage("user", prompt);
+  }
   setLoading(true);
 
+  if (generateImage) {
+    await generateImageFromPrompt(prompt);
+  } else {
+    await generateTextFromPrompt(prompt, file);
+  }
+}
+
+async function generateTextFromPrompt(prompt, file) {
   const parts = [];
 
   if (file) {
@@ -282,9 +304,56 @@ async function sendMessage() {
   }
 }
 
+async function generateImageFromPrompt(prompt) {
+  let messageElement = addMessage("model", "", false, true); // Add image loading placeholder
+
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: {
+        parts: [{
+          text: prompt
+        }, ],
+      },
+      config: {
+        responseModalities: [Modality.IMAGE],
+      },
+    });
+
+    let imageFound = false;
+    for (const part of response.candidates[0].content.parts) {
+      if (part.inlineData) {
+        playAudioCue('receive');
+        const base64ImageBytes = part.inlineData.data;
+        const imageUrl = `data:${part.inlineData.mimeType};base64,${base64ImageBytes}`;
+        const img = document.createElement('img');
+        img.src = imageUrl;
+        img.alt = prompt; // Add alt text for accessibility
+        messageElement.querySelector('.message-content').innerHTML = ''; // Clear loader
+        messageElement.querySelector('.message-content').appendChild(img);
+        addFeedbackControls(messageElement);
+        imageFound = true;
+        break;
+      }
+    }
+
+    if (!imageFound) {
+      throw new Error("Image data not found in response.");
+    }
+  } catch (error) {
+    const friendlyError = getFriendlyErrorMessage(error);
+    messageElement.remove(); // Remove the loader on error
+    addMessage("error", `Image generation failed: ${friendlyError}`);
+    console.error("Error during generateImageFromPrompt:", error);
+  } finally {
+    setLoading(false);
+  }
+}
+
+
 // --- UI AND UX FUNCTIONS ---
 
-function addMessage(role, text, isStreaming = false) {
+function addMessage(role, text, isStreaming = false, isImageLoading = false) {
   const messageId = `msg-${Date.now()}-${Math.random()}`;
   const messageWrapper = document.createElement("div");
   messageWrapper.className = `message ${role}-message`;
@@ -293,7 +362,14 @@ function addMessage(role, text, isStreaming = false) {
   const messageContent = document.createElement("div");
   messageContent.className = "message-content";
 
-  if (text) {
+  if (isImageLoading) {
+    messageContent.innerHTML = `
+      <div class="image-loader-container">
+        <div class="image-loader-placeholder"></div>
+        <span>Generating image...</span>
+      </div>
+    `;
+  } else if (text) {
     if (role === 'model') {
       messageContent.innerHTML = marked.parse(text);
     } else {
@@ -313,6 +389,7 @@ function addMessage(role, text, isStreaming = false) {
     messageContent.textContent = text;
   }
 
+
   const timestamp = document.createElement('span');
   timestamp.className = 'timestamp';
   timestamp.textContent = new Date().toLocaleTimeString([], {
@@ -327,7 +404,7 @@ function addMessage(role, text, isStreaming = false) {
   chatContainer.scrollTop = chatContainer.scrollHeight;
 
   // Add feedback controls if it's a complete model message
-  if (role === 'model' && !isStreaming) {
+  if (role === 'model' && !isStreaming && !isImageLoading) {
     addFeedbackControls(messageWrapper);
   }
 
@@ -336,12 +413,17 @@ function addMessage(role, text, isStreaming = false) {
 
 function setLoading(isLoading) {
   submitBtn.disabled = isLoading;
+  imageGenBtn.disabled = isLoading;
   uploadBtn.disabled = isLoading;
   voiceBtn.disabled = isLoading;
   cameraBtn.disabled = isLoading;
   promptInput.disabled = isLoading;
   (sendIcon as HTMLElement).hidden = isLoading;
   (loader as HTMLElement).hidden = !isLoading;
+  // Visually hide the image gen button and show loader on the submit button
+  (imageGenBtn as HTMLElement).style.display = isLoading ? 'none' : 'flex';
+  (submitBtn as HTMLElement).style.display = 'flex';
+
 
   if (isLoading) {
     chatContainer.setAttribute('aria-busy', 'true');
@@ -349,9 +431,11 @@ function setLoading(isLoading) {
   } else {
     chatContainer.removeAttribute('aria-busy');
     loader.setAttribute('aria-label', 'Loading');
+    (imageGenBtn as HTMLElement).style.display = 'flex';
     clearInput();
   }
 }
+
 
 function clearInput() {
   promptInput.value = "";
@@ -430,7 +514,13 @@ async function openCamera() {
     cameraModal.hidden = false;
   } catch (err) {
     console.error("Error accessing camera:", err);
-    addMessage("error", "Could not access the camera. Please ensure permissions are granted.");
+    let errorMessage = "Could not access the camera. Please check your connection and browser permissions.";
+    if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+      errorMessage = "Camera access was denied. To use this feature, please allow camera permissions in your browser's site settings.";
+    } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+      errorMessage = "No camera found on this device. Please ensure a camera is connected and enabled.";
+    }
+    addMessage("error", errorMessage);
   }
 }
 
@@ -654,6 +744,11 @@ function startOnboardingTour() {
     content: 'Prefer to speak? Click the microphone to ask your question using your voice.',
     position: 'top'
   }, {
+    element: '#image-gen-btn',
+    title: 'NEW: Image Generation',
+    content: 'Want a visual? Type a description and click the ✨ icon to generate a health-related image.',
+    position: 'top'
+  }, {
     element: '.model-message',
     title: 'AI Responses',
     content: 'The AI\'s response will appear here. After a response is complete, you can provide feedback using the thumbs up/down icons.',
@@ -663,6 +758,7 @@ function startOnboardingTour() {
   let currentStep = 0;
   showTourStep(tourSteps, currentStep);
 }
+
 
 function showTourStep(steps, stepIndex) {
   // End tour if no more steps
