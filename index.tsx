@@ -261,7 +261,6 @@ async function sendMessage(generateImage = false) {
     welcomeContainer.style.display = 'none';
   }
 
-  playAudioCue('send');
   if (prompt) {
     addMessage("user", prompt);
   }
@@ -312,8 +311,6 @@ async function generateTextFromPrompt(userParts) {
   let currentResponse = "";
   let messageElement = addMessage("model", "", true);
 
-  playAudioCue('processing');
-
   try {
      const resultStream = await withRetry(async () => {
         return ai.models.generateContentStream({
@@ -333,7 +330,6 @@ async function generateTextFromPrompt(userParts) {
       const chunkText = chunk.text;
       if (chunkText) {
         if (!hasReceivedText) {
-          playAudioCue('receive');
           if (messageElement) {
             messageElement.querySelector('.message-content').innerHTML = '';
           }
@@ -410,7 +406,6 @@ async function generateTextFromPrompt(userParts) {
 
 async function generateImageFromPrompt(userParts) {
   let messageElement = addMessage("model", "", false, true);
-  playAudioCue('imageGenStart');
   const userContent = {
     role: 'user',
     parts: userParts
@@ -433,7 +428,6 @@ async function generateImageFromPrompt(userParts) {
     if (modelResponseParts) {
       for (const part of modelResponseParts) {
         if (part.inlineData) {
-          playAudioCue('imageGenSuccess');
           const base64ImageBytes = part.inlineData.data;
           const imageUrl = `data:${part.inlineData.mimeType};base64,${base64ImageBytes}`;
           const img = document.createElement('img');
@@ -533,7 +527,6 @@ function addMessage(role, textOrParts, isStreaming = false, isImageLoading = fal
       p.textContent = textOrParts as string;
       messageContent.appendChild(p);
     } else if (role === 'error') {
-      playAudioCue('error');
       messageWrapper.classList.add('error-message');
       messageContent.textContent = textOrParts as string;
     }
@@ -646,7 +639,6 @@ function handleFileUpload() {
     welcomeContainer.style.display = 'none';
   }
 
-  playAudioCue('upload');
   filePreview.innerHTML = "";
   filePreview.hidden = false;
   inputRow.classList.add('input-row--active');
@@ -738,17 +730,20 @@ function loadChatHistory() {
       if (savedHistory) {
           chatHistory = JSON.parse(savedHistory);
           if (!chatContainer) return;
-          chatContainer.innerHTML = ''; // Clear welcome message
-          chatHistory.forEach(message => {
-              if (message.role === 'user') {
-                  addMessage('user', message.parts.find(p => 'text' in p)?.text || "");
-              } else if (message.role === 'model') {
-                  addMessage('model', message.parts);
-              }
-          });
 
-          if(chatHistory.length > 0 && welcomeContainer) {
-              welcomeContainer.style.display = 'none';
+          if (chatHistory.length > 0) {
+              // Hide the welcome container instead of deleting the chat container's content
+              if (welcomeContainer) {
+                welcomeContainer.style.display = 'none';
+              }
+              // Add messages from history
+              chatHistory.forEach(message => {
+                  if (message.role === 'user') {
+                      addMessage('user', message.parts.find(p => 'text' in p)?.text || "");
+                  } else if (message.role === 'model') {
+                      addMessage('model', message.parts);
+                  }
+              });
           }
       }
     } catch(e) {
@@ -770,10 +765,22 @@ function startNewChat() {
         } catch(e) {
           console.warn("Could not remove chat history from localStorage.", e);
         }
-        if(chatContainer) chatContainer.innerHTML = '';
-        if (welcomeContainer) {
-          welcomeContainer.style.display = 'block';
+
+        if (chatContainer) {
+            // Remove all direct children of the chat container except for the welcome screen
+            const children = Array.from(chatContainer.children);
+            children.forEach(child => {
+                if (child.id !== 'welcome-container') {
+                    child.remove();
+                }
+            });
         }
+        
+        if (welcomeContainer) {
+          welcomeContainer.style.display = 'flex';
+        }
+        
+        clearInput();
     }
 }
 
@@ -1037,7 +1044,7 @@ function changeVolume(event) {
 
 // --- AUDIO OUTPUT & PLAYBACK ---
 
-function addAudioControls(messageElement) {
+function addAudioControls(messageElement: HTMLElement) {
     if (!messageElement || messageElement.querySelector('.audio-controls')) return;
 
     const controlsContainer = document.createElement('div');
@@ -1067,7 +1074,8 @@ function addAudioControls(messageElement) {
 }
 
 
-async function handlePlayPause(messageElement, button) {
+
+async function handlePlayPause(messageElement: HTMLElement, button: HTMLButtonElement) {
     const messageId = messageElement.id;
     const contentElement = messageElement.querySelector('.message-content');
     if (!contentElement) return;
@@ -1091,14 +1099,14 @@ async function handlePlayPause(messageElement, button) {
     }
 }
 
-function handleVolumeChange(slider) {
+function handleVolumeChange(slider: HTMLInputElement) {
     if (currentGainNode) {
         currentGainNode.gain.value = parseFloat(slider.value);
     }
 }
 
 
-async function generateAndPlayAudio(text, messageId, button) {
+async function generateAndPlayAudio(text: string, messageId: string, button: HTMLButtonElement) {
     const playIcon = button.querySelector('.play-icon');
     const pauseIcon = button.querySelector('.pause-icon');
     const loader = button.querySelector('.audio-loader');
@@ -1148,7 +1156,7 @@ async function generateAndPlayAudio(text, messageId, button) {
     }
 }
 
-function playAudio(audioBuffer, messageId, button) {
+function playAudio(audioBuffer: AudioBuffer, messageId: string, button: HTMLButtonElement) {
     if (!outputAudioContext) return;
     
     // Resume context if it was suspended by browser policy
@@ -1203,7 +1211,6 @@ function decode(base64: string): Uint8Array {
     return bytes;
   } catch (e) {
     console.error("Base64 decoding failed:", e);
-    // Return an empty array on failure to prevent downstream crashes
     return new Uint8Array(0);
   }
 }
@@ -1214,216 +1221,98 @@ async function decodeAudioData(
   sampleRate: number,
   numChannels: number,
 ): Promise<AudioBuffer> {
-  try {
-    // This is a custom raw PCM decoder, as browsers' native decodeAudioData expects a file format header.
-    if (data.length === 0) {
-        console.warn("decodeAudioData received empty data array.");
-        return ctx.createBuffer(numChannels, 0, sampleRate);
+  const dataInt16 = new Int16Array(data.buffer);
+  const frameCount = dataInt16.length / numChannels;
+  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
+
+  for (let channel = 0; channel < numChannels; channel++) {
+    const channelData = buffer.getChannelData(channel);
+    for (let i = 0; i < frameCount; i++) {
+      channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
     }
-    const dataInt16 = new Int16Array(data.buffer);
-    const frameCount = dataInt16.length / numChannels;
-    const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
-
-    for (let channel = 0; channel < numChannels; channel++) {
-      const channelData = buffer.getChannelData(channel);
-      for (let i = 0; i < frameCount; i++) {
-        // Normalize from 16-bit signed integer to a float between -1.0 and 1.0
-        channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
-      }
-    }
-    return buffer;
-  } catch(e) {
-    console.error("Failed to decode raw audio data:", e);
-    // Return an empty buffer on failure
-    return ctx.createBuffer(numChannels, 0, sampleRate);
   }
+  return buffer;
 }
 
 
-// --- MISC HELPERS ---
-function addFeedbackControls(messageElement) {
-  if (!messageElement || messageElement.querySelector('.image-loader-container') || messageElement.querySelector('.feedback-container')) return;
-
-  const feedbackContainer = document.createElement('div');
-  feedbackContainer.className = 'feedback-container';
-  const copyBtn = document.createElement('button');
-  copyBtn.className = 'feedback-btn copy-btn';
-  const copyIcon = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"></path></svg>`;
-  const checkIcon = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"></path></svg>`;
-  copyBtn.innerHTML = copyIcon;
-  copyBtn.onclick = () => {
-    const content = messageElement.querySelector('.message-content')?.textContent || '';
-    navigator.clipboard.writeText(content).then(() => {
-      copyBtn.innerHTML = checkIcon;
-      copyBtn.classList.add('copied');
-      setTimeout(() => {
-        copyBtn.innerHTML = copyIcon;
-        copyBtn.classList.remove('copied');
-      }, 2000);
-    }).catch(err => {
-        addMessage("error", "Could not copy text to clipboard.");
-    });
-  };
-
-  const thumbsUpBtn = document.createElement('button');
-  thumbsUpBtn.className = 'feedback-btn';
-  thumbsUpBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z"></path></svg>`;
-  const thumbsDownBtn = document.createElement('button');
-  thumbsDownBtn.className = 'feedback-btn';
-  thumbsDownBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05c-.09.23-.14.47-.14.73v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L9.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z"></path></svg>`;
-  thumbsUpBtn.onclick = () => handleFeedbackClick(messageElement.id, 'up', thumbsUpBtn, thumbsDownBtn);
-  thumbsDownBtn.onclick = () => handleFeedbackClick(messageElement.id, 'down', thumbsUpBtn, thumbsDownBtn);
-  
-  feedbackContainer.append(copyBtn, thumbsUpBtn, thumbsDownBtn);
-  messageElement.appendChild(feedbackContainer);
-}
-
-function handleFeedbackClick(messageId, vote, btnUp, btnDown) {
-  try {
-    const feedback = JSON.parse(localStorage.getItem('messageFeedback')) || {};
-    feedback[messageId] = vote;
-    localStorage.setItem('messageFeedback', JSON.stringify(feedback));
-  } catch(e) {
-    console.warn("Could not save feedback to localStorage.", e);
-  }
-
-  btnUp.disabled = true;
-  btnDown.disabled = true;
-  if (vote === 'up') btnUp.classList.add('selected');
-  else btnDown.classList.add('selected');
-}
-
-function playAudioCue(type) {
-  try {
-    const audioCtx = new(window.AudioContext || (window as any).webkitAudioContext)();
-    const osc = audioCtx.createOscillator();
-    const gain = audioCtx.createGain();
-    osc.connect(gain).connect(audioCtx.destination);
-    gain.gain.setValueAtTime(0, audioCtx.currentTime);
-
-    const ramps = {
-      send: { t: 'sine', f: 500, g: 0.1, r1: 0.05, r2: 0.15, d: 0.2 },
-      receive: { t: 'sine', f: 600, g: 0.08, r1: 0.05, r2: 0.2, d: 0.25 },
-      error: { t: 'square', f: 150, g: 0.1, r1: 0.05, r2: 0.3, d: 0.35 },
-      upload: { t: 'triangle', f: 440, f2: 660, ft: 0.1, g: 0.1, r1: 0.05, r2: 0.25, d: 0.3 },
-      imageGenStart: { t: 'sawtooth', f: 220, g: 0.05, r1: 0.05, r2: 0.4, d: 0.45 },
-      processing: { t: 'sawtooth', f: 100, f2: 150, ft: 0.1, g: 0.04, r1: 0.05, r2: 0.2, d: 0.25 },
-      imageGenSuccess: { t: 'sine', f: 880, f2: 1200, ft: 0.1, g: 0.1, r1: 0.05, r2: 0.2, d: 0.25 },
-    };
-
-    const p = ramps[type];
-    if (!p) return;
-    osc.type = p.t as OscillatorType;
-    osc.frequency.setValueAtTime(p.f, audioCtx.currentTime);
-    if (p.f2) osc.frequency.linearRampToValueAtTime(p.f2, audioCtx.currentTime + p.ft);
-    gain.gain.exponentialRampToValueAtTime(p.g, audioCtx.currentTime + p.r1);
-    gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + p.r2);
-
-    osc.start(audioCtx.currentTime);
-    osc.stop(audioCtx.currentTime + p.d);
-  } catch (e) {
-    console.warn("Could not play audio cue.", e);
-  }
-}
-
-async function withRetry(apiCall, maxRetries = 3, initialDelay = 1000) {
-    let attempt = 0;
-    while (attempt < maxRetries) {
-        try {
-            return await apiCall();
-        } catch (error) {
-            const msg = error?.toString() || "";
-            const isRetryable = msg.includes('429') || msg.includes('500') || msg.includes('503');
-
-            if (isRetryable && attempt < maxRetries - 1) {
-                attempt++;
-                const delay = initialDelay * Math.pow(2, attempt - 1);
-                console.warn(`Attempt ${attempt} failed due to a retryable error. Retrying in ${delay}ms...`, error);
-                await new Promise(resolve => setTimeout(resolve, delay));
-            } else {
-                throw error; // Not a retryable error or max retries reached, re-throw the error
-            }
-        }
-    }
-}
-
+// --- UTILITY AND HELPER FUNCTIONS ---
 
 function getFriendlyErrorMessage(error) {
-  console.error("Raw Error:", error);
-
-  // 1. Handle specific Web API errors (SpeechRecognition, MediaDevices)
-  if (error instanceof DOMException) {
-    switch (error.name) {
-      case 'NotAllowedError': return 'Permission Denied: Access to the microphone or camera was denied. Please allow permissions in your browser settings.';
-      case 'NotFoundError': return 'Device Not Found: No camera or microphone was found on this device.';
-      case 'NotReadableError': return 'Device In Use: The camera or microphone is already in use by another application.';
-      default: return `A device error occurred: ${error.name}`;
+    console.error("Original Error:", error);
+    if (typeof error === 'string') return error;
+    if (error instanceof Error) {
+        if (error.message.includes('API key not valid')) {
+            return "Invalid API Key. Please ensure your API key is set up correctly.";
+        }
+        if (error.message.includes('429')) {
+            return "You have exceeded your API quota. Please check your billing account or try again later.";
+        }
+         if (error.message.includes('503')) {
+            return "The service is temporarily unavailable. Please try again in a few moments.";
+        }
+        if(error.message.includes('blocked') || error.message.includes('safety')) {
+            return "The response was blocked due to safety filters. Please try a different prompt.";
+        }
+        if (error.name === 'NotAllowedError') {
+             return "Access to camera or microphone was denied. Please allow permission in your browser settings.";
+        }
+        if(error.name === 'NotFoundError') {
+             return "No camera or microphone found. Please ensure your device is connected properly.";
+        }
+        if(error.name === "NotReadableError") {
+            return "Your camera or microphone is already in use by another application.";
+        }
+        return `A technical error occurred: ${error.message}`;
     }
-  }
-  if (error && (error as any).error) { // For SpeechRecognitionErrorEvent
-     const speechError = (error as any).error;
-     if (speechError === 'no-speech') return "No speech was detected. Please try again.";
-     if (speechError === 'not-allowed') return "Permission Denied: Access to the microphone was denied. Please allow permissions in your browser settings.";
-     if (speechError === 'network') return "Network Error: A network problem is preventing voice input.";
-     return `Voice input error: ${speechError}`;
-  }
-  
-  // 2. Handle generic network errors (e.g., from fetch)
-  if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
-    return 'Network Error: Unable to connect to the service. Please check your internet connection.';
-  }
-
-  // 3. Handle Gemini API and other string-based errors
-  const msg = error?.toString() || "An unknown error occurred.";
-  if (msg.includes('API key not valid')) return 'API Key Error: Please ensure your API key is configured correctly.';
-  if (msg.includes('400') || msg.includes('Invalid argument')) return 'Invalid Request: The data sent to the AI was invalid, possibly due to an unsupported file type. Please try again.';
-  if (msg.includes('429')) return 'Rate Limit Exceeded: The service is temporarily busy. Please wait a moment before sending another request.';
-  if (msg.includes('500') || msg.includes('503')) return 'Server Error: The AI service is temporarily unavailable. Please try again later.';
-  if (msg.includes('[SAFETY]') || msg.includes('blocked by safety')) return 'Content Moderation: The request or response was blocked due to safety settings. Please rephrase your prompt.';
-
-  // 4. Fallback for other errors
-  if (error && (error as Error).message) {
-      return `An unexpected error occurred: ${(error as Error).message}`;
-  }
-  
-  return 'An unexpected error occurred. Please check the browser console for details.';
+    if (error && (error as any).error && (error as any).error.message) {
+      return (error as any).error.message;
+    }
+    return "An unknown error occurred. Please check the console for details.";
 }
 
 function isResponseInsufficient(text) {
-  if (text === null || text === undefined) return true;
-  const trimmedText = text.trim();
-  if (trimmedText.length === 0) return true;
-  // This list checks for common refusal patterns and disclaimer-only responses.
-  const patterns = [
-      /\[Wellness Guide\]/gi, /\[Advisory Notice\].*?issues\./gi, /\[🚨 IMMEDIATE DANGER ALERT\].*?NOW\./gi,
-      /Full Disclaimer A: WELLNESS ADVISORY.*?treatment\./gis,
-      /Full Disclaimer B: CRITICAL HEALTH WARNING.*?immediately\./gis,
-      /Full Disclaimer C \(Refusal\).*?active\.\)/gis,
-      /I am a safety-first, ethical AI.*?professional immediately\./gis,
-      /I (am unable to|cannot|can't) (provide|answer|fulfill|generate|give|assist with|create content of that nature)/gi,
-      /as an AI,? I am not able to/gi, /I do not have the ability to/gi,
-      /(for your safety|due to my safety guidelines|as a safety precaution|based on my safety policies)/gi,
-      /I'm sorry, but I cannot/gi, /Unfortunately, I am unable to/gi,
-      /My apologies, but I'm not supposed to/gi, /I must decline this request/gi,
-      /It is outside of my capabilities to/gi, /I am not designed to/gi,
-      /As a large language model/gi, /My instructions prevent me from/gi,
-      /That request goes against my safety policies/gi, /I'm unable to provide information on that topic/gi,
-      /cannot provide specific medical advice/gi, /crucial to consult with a qualified healthcare provider/gi,
-      /My purpose is to provide general information and not to replace professional medical advice/gi,
-      /I am not a medical professional/gi, /It is important to seek advice from a medical professional/gi,
-      /Please consult your doctor or pharmacist/gi, /This information is for educational purposes only/gi,
-      /I am only an AI assistant/gi, /However, I can't give you medical advice/gi,
-      /This information should not be used as a substitute for professional medical advice, diagnosis, or treatment\./gi,
-      /Always seek the advice of your physician or other qualified health provider/gi,
-      /If you are in a crisis or may have an emergency, please call your local emergency services immediately\./gi,
-      /I cannot assist with that as it falls outside my safety guidelines\./gi,
-      /I must emphasize that I am an AI/gi,
-  ];
-  
-  let substantiveContent = trimmedText;
-  for (const p of patterns) { 
-      substantiveContent = substantiveContent.replace(p, ''); 
-  }
-  // If after removing all disclaimers and refusals, there's very little text left, it's insufficient.
-  return substantiveContent.trim().length < 25;
+    if (!text || text.trim().length < 10) return true;
+    const lowerText = text.toLowerCase();
+    const refusalPatterns = [
+        "i cannot", "i am unable", "i am not able", "as an ai", "my purpose is to", "my safety guidelines"
+    ];
+    return refusalPatterns.some(pattern => lowerText.includes(pattern));
+}
+
+async function withRetry(fn, retries = 3, delay = 1000) {
+    let lastError;
+    for (let i = 0; i < retries; i++) {
+        try {
+            return await fn();
+        } catch (error) {
+            lastError = error;
+            if (error.message.includes('429')) { // Rate limit error
+                await new Promise(res => setTimeout(res, delay * Math.pow(2, i)));
+            } else {
+                throw error; // Don't retry on other errors
+            }
+        }
+    }
+    throw lastError;
+}
+
+function addFeedbackControls(messageElement: HTMLElement) {
+    if (!messageElement || messageElement.querySelector('.feedback-container')) return;
+
+    const feedbackContainer = document.createElement('div');
+    feedbackContainer.className = 'feedback-container';
+
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'feedback-btn';
+    copyBtn.setAttribute('aria-label', 'Copy message');
+    copyBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"></path></svg>`;
+    copyBtn.onclick = () => {
+        const content = messageElement.querySelector('.message-content').innerText;
+        navigator.clipboard.writeText(content);
+        copyBtn.classList.add('copied');
+        setTimeout(() => copyBtn.classList.remove('copied'), 2000);
+    };
+
+    feedbackContainer.appendChild(copyBtn);
+    messageElement.appendChild(feedbackContainer);
 }
