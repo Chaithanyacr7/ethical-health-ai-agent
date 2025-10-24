@@ -154,8 +154,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Initialize chat
   initChat().catch(err => {
-    addMessage("error", `AI initialization failed:\n${err.message}`);
-    console.error(err);
+    addMessage("error", `AI initialization failed:\n${getFriendlyErrorMessage(err)}`);
+    console.error("Fatal: AI Initialization Failed", err);
   });
 
   setupEventListeners();
@@ -164,6 +164,7 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 function setupEventListeners() {
+  if (!chatForm) return; // Guard against missing elements
   chatForm.addEventListener("submit", (e) => {
     e.preventDefault();
     sendMessage();
@@ -195,7 +196,7 @@ function setupEventListeners() {
   newChatBtn.addEventListener("click", startNewChat);
 
   // Prompt suggestions
-  promptSuggestions.addEventListener('click', (e) => {
+  promptSuggestions?.addEventListener('click', (e) => {
     const target = e.target as HTMLButtonElement;
     if (target.classList.contains('suggestion-chip')) {
         promptInput.value = target.textContent;
@@ -216,17 +217,16 @@ function setupEventListeners() {
     }
   });
 
-
   // Voice recognition
   if (SpeechRecognition) {
     voiceBtn.addEventListener("click", toggleVoiceRecognition);
-  } else {
+  } else if (voiceBtn) {
     voiceBtn.style.display = 'none';
   }
 
   // Visualizer controls
-  muteBtn.addEventListener('click', toggleMute);
-  volumeSlider.addEventListener('input', changeVolume);
+  muteBtn?.addEventListener('click', toggleMute);
+  volumeSlider?.addEventListener('input', changeVolume);
 
   // Global keyboard shortcuts
   document.addEventListener('keydown', handleGlobalKeyDown);
@@ -241,11 +241,17 @@ async function initChat() {
     });
   } catch (error) {
     console.error("AI client initialization failed:", error);
-    addMessage("error", getFriendlyErrorMessage(error));
+    // The error will be caught and displayed by the caller in DOMContentLoaded
+    throw error;
   }
 }
 
 async function sendMessage(generateImage = false) {
+  if (!ai) {
+    addMessage("error", "The AI is not initialized. Please check your API key and refresh the page.");
+    return;
+  }
+
   const prompt = promptInput.value.trim();
   const file = fileUpload.files[0];
 
@@ -272,6 +278,7 @@ async function sendMessage(generateImage = false) {
         }
       });
     } catch (error) {
+      console.error("File to Base64 conversion failed:", error);
       addMessage("error", "Failed to read the attached file.");
       setLoading(false);
       return;
@@ -283,10 +290,17 @@ async function sendMessage(generateImage = false) {
     });
   }
 
-  if (generateImage) {
-    await generateImageFromPrompt(userParts);
-  } else {
-    await generateTextFromPrompt(userParts);
+  try {
+    if (generateImage) {
+      await generateImageFromPrompt(userParts);
+    } else {
+      await generateTextFromPrompt(userParts);
+    }
+  } catch (error) {
+    // This is a fallback for unexpected errors within the generation functions
+    console.error("An unexpected error occurred in sendMessage:", error);
+    addMessage("error", `An unexpected error occurred: ${getFriendlyErrorMessage(error)}`);
+    setLoading(false);
   }
 }
 
@@ -320,24 +334,34 @@ async function generateTextFromPrompt(userParts) {
       if (chunkText) {
         if (!hasReceivedText) {
           playAudioCue('receive');
-          messageElement.querySelector('.message-content').innerHTML = '';
+          if (messageElement) {
+            messageElement.querySelector('.message-content').innerHTML = '';
+          }
           hasReceivedText = true;
         }
 
         currentResponse += chunkText;
-        const sanitizedHtml = marked.parse(currentResponse, {
-          gfm: true,
-          breaks: true,
-          highlight: function(code, lang) {
-            const language = hljs.getLanguage(lang) ? lang : 'plaintext';
-            return hljs.highlight(code, {
-              language,
-              ignoreIllegals: true
-            }).value;
+        if (messageElement) {
+          let sanitizedHtml;
+          try {
+            sanitizedHtml = marked.parse(currentResponse, {
+              gfm: true,
+              breaks: true,
+              highlight: function(code, lang) {
+                const language = hljs.getLanguage(lang) ? lang : 'plaintext';
+                return hljs.highlight(code, {
+                  language,
+                  ignoreIllegals: true
+                }).value;
+              }
+            });
+          } catch (e) {
+            console.warn("Markdown parsing error, displaying raw text:", e);
+            sanitizedHtml = currentResponse.replace(/</g, "&lt;").replace(/>/g, "&gt;");
           }
-        });
-        messageElement.querySelector('.message-content').innerHTML = sanitizedHtml;
-        chatContainer.scrollTop = chatContainer.scrollHeight;
+          messageElement.querySelector('.message-content').innerHTML = sanitizedHtml;
+          chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
       }
     }
 
@@ -419,16 +443,16 @@ async function generateImageFromPrompt(userParts) {
 
 
           img.onload = () => {
-            const loader = messageElement.querySelector('.image-loader-container');
+            const loader = messageElement?.querySelector('.image-loader-container');
             if (loader) {
               loader.replaceWith(img);
             }
-            addFeedbackControls(messageElement);
+            if (messageElement) addFeedbackControls(messageElement);
             chatContainer.scrollTop = chatContainer.scrollHeight;
           };
 
           img.onerror = () => {
-            messageElement.remove();
+            messageElement?.remove();
             addMessage("error", "Failed to load the generated image.");
           };
 
@@ -446,11 +470,11 @@ async function generateImageFromPrompt(userParts) {
     }
 
     if (!imageFound) {
-      throw new Error("Image data not found in response.");
+      throw new Error("Image data not found in response. The request may have been blocked by safety filters.");
     }
   } catch (error) {
     const friendlyError = getFriendlyErrorMessage(error);
-    messageElement.remove();
+    messageElement?.remove();
     addMessage("error", `Image generation failed: ${friendlyError}`);
     console.error("Error during generateImageFromPrompt:", error);
   } finally {
@@ -462,6 +486,7 @@ async function generateImageFromPrompt(userParts) {
 // --- UI AND UX FUNCTIONS ---
 
 function addMessage(role, textOrParts, isStreaming = false, isImageLoading = false) {
+  if (!chatContainer) return null;
   const messageId = `msg-${Date.now()}-${Math.random()}`;
   const messageWrapper = document.createElement("div");
   messageWrapper.className = `message ${role}-message`;
@@ -539,6 +564,7 @@ function addMessage(role, textOrParts, isStreaming = false, isImageLoading = fal
 }
 
 function appendSources(messageElement, groundingChunks) {
+  if (!messageElement || !groundingChunks) return;
   const webChunks = groundingChunks.filter(chunk => chunk.web && chunk.web.uri);
   if (webChunks.length === 0) return;
 
@@ -557,44 +583,60 @@ function appendSources(messageElement, groundingChunks) {
     list.appendChild(listItem);
   });
   sourcesContainer.appendChild(list);
-  messageElement.querySelector('.message-content').appendChild(sourcesContainer);
-  chatContainer.scrollTop = chatContainer.scrollHeight;
+  const contentEl = messageElement.querySelector('.message-content');
+  if (contentEl) {
+    contentEl.appendChild(sourcesContainer);
+    chatContainer.scrollTop = chatContainer.scrollHeight;
+  }
 }
 
 function setLoading(isLoading) {
   const buttonsToDisable = [submitBtn, imageGenBtn, uploadBtn, voiceBtn, cameraBtn, newChatBtn];
-  buttonsToDisable.forEach(btn => btn.disabled = isLoading);
+  buttonsToDisable.forEach(btn => { if(btn) btn.disabled = isLoading });
   
-  promptInput.disabled = isLoading;
-  (sendIcon as HTMLElement).hidden = isLoading;
-  (loader as HTMLElement).hidden = !isLoading;
-  (imageGenBtn as HTMLElement).style.display = isLoading ? 'none' : 'flex';
+  if(promptInput) promptInput.disabled = isLoading;
+  if(sendIcon) (sendIcon as HTMLElement).hidden = isLoading;
+  if(loader) (loader as HTMLElement).hidden = !isLoading;
+  if(imageGenBtn) (imageGenBtn as HTMLElement).style.display = isLoading ? 'none' : 'flex';
 
   if (isLoading) {
-    chatContainer.setAttribute('aria-busy', 'true');
+    chatContainer?.setAttribute('aria-busy', 'true');
   } else {
-    chatContainer.removeAttribute('aria-busy');
+    chatContainer?.removeAttribute('aria-busy');
     clearInput();
   }
 }
 
 function clearInput() {
-  promptInput.value = "";
-  fileUpload.value = "";
-  filePreview.innerHTML = "";
-  filePreview.hidden = true;
-  promptInput.style.height = 'auto';
-  (promptInput as HTMLTextAreaElement).placeholder = 'Ask about wellness or medications...';
-  inputRow.classList.remove('input-row--active');
+  if (promptInput) {
+    promptInput.value = "";
+    promptInput.style.height = 'auto';
+    (promptInput as HTMLTextAreaElement).placeholder = 'Ask about wellness or medications...';
+  }
+  if (fileUpload) fileUpload.value = "";
+  if (filePreview) {
+    filePreview.innerHTML = "";
+    filePreview.hidden = true;
+  }
+  if(inputRow) inputRow.classList.remove('input-row--active');
 }
 
 // --- FILE HANDLING ---
 function handleFileUpload() {
   const file = fileUpload.files[0];
   if (!file) {
-    filePreview.hidden = true;
+    if (filePreview) filePreview.hidden = true;
     return;
   }
+
+  // File size check (e.g., 10MB limit)
+  const MAX_FILE_SIZE_MB = 10;
+  if (file.size > MAX_FILE_SIZE_MB * 1024 * 1024) {
+      addMessage("error", `File is too large. Please select a file smaller than ${MAX_FILE_SIZE_MB}MB.`);
+      fileUpload.value = ""; // Clear the selected file
+      return;
+  }
+
   if (welcomeContainer) {
     welcomeContainer.style.display = 'none';
   }
@@ -639,20 +681,31 @@ function fileToBase64(file) {
 
 // --- THEME MANAGEMENT ---
 function applyInitialTheme() {
-    const savedTheme = localStorage.getItem('theme') || 'light';
-    document.body.dataset.theme = savedTheme;
-    updateThemeToggle(savedTheme);
+    try {
+      const savedTheme = localStorage.getItem('theme') || 'light';
+      document.body.dataset.theme = savedTheme;
+      updateThemeToggle(savedTheme);
+    } catch (e) {
+      console.warn("Could not access localStorage to apply theme.", e);
+      document.body.dataset.theme = 'light';
+      updateThemeToggle('light');
+    }
 }
 
 function toggleTheme() {
     const currentTheme = document.body.dataset.theme || 'light';
     const newTheme = currentTheme === 'light' ? 'dark' : 'light';
     document.body.dataset.theme = newTheme;
-    localStorage.setItem('theme', newTheme);
+    try {
+      localStorage.setItem('theme', newTheme);
+    } catch(e) {
+      console.warn("Could not save theme to localStorage.", e);
+    }
     updateThemeToggle(newTheme);
 }
 
 function updateThemeToggle(theme) {
+    if(!sunIcon || !moonIcon || !hljsTheme) return;
     if (theme === 'dark') {
         sunIcon.hidden = true;
         moonIcon.hidden = false;
@@ -667,55 +720,54 @@ function updateThemeToggle(theme) {
 
 // --- CHAT HISTORY MANAGEMENT ---
 function saveChatHistory() {
-  localStorage.setItem('chatHistory', JSON.stringify(chatHistory));
+  try {
+    localStorage.setItem('chatHistory', JSON.stringify(chatHistory));
+  } catch(e) {
+    console.warn("Could not save chat history to localStorage.", e);
+  }
 }
 
 function loadChatHistory() {
-    const savedHistory = localStorage.getItem('chatHistory');
-    if (savedHistory) {
-        chatHistory = JSON.parse(savedHistory);
-        chatContainer.innerHTML = ''; // Clear welcome message
-        chatHistory.forEach(message => {
-            if (message.role === 'user') {
-                addMessage('user', message.parts.find(p => 'text' in p)?.text || "");
-            } else if (message.role === 'model') {
-                addMessage('model', message.parts);
-            }
-        });
+    try {
+      const savedHistory = localStorage.getItem('chatHistory');
+      if (savedHistory) {
+          chatHistory = JSON.parse(savedHistory);
+          if (!chatContainer) return;
+          chatContainer.innerHTML = ''; // Clear welcome message
+          chatHistory.forEach(message => {
+              if (message.role === 'user') {
+                  addMessage('user', message.parts.find(p => 'text' in p)?.text || "");
+              } else if (message.role === 'model') {
+                  addMessage('model', message.parts);
+              }
+          });
 
-        if(chatHistory.length > 0 && welcomeContainer) {
-            welcomeContainer.style.display = 'none';
-        }
+          if(chatHistory.length > 0 && welcomeContainer) {
+              welcomeContainer.style.display = 'none';
+          }
+      }
+    } catch(e) {
+      console.error("Failed to load or parse chat history from localStorage. Starting fresh.", e);
+      chatHistory = [];
+      try {
+        localStorage.removeItem('chatHistory');
+      } catch(removeError) {
+        console.error("Failed to remove corrupted chat history.", removeError);
+      }
     }
 }
 
 function startNewChat() {
     if (confirm("Are you sure you want to start a new chat? Your current conversation will be cleared.")) {
         chatHistory = [];
-        localStorage.removeItem('chatHistory');
-        chatContainer.innerHTML = '';
+        try {
+          localStorage.removeItem('chatHistory');
+        } catch(e) {
+          console.warn("Could not remove chat history from localStorage.", e);
+        }
+        if(chatContainer) chatContainer.innerHTML = '';
         if (welcomeContainer) {
           welcomeContainer.style.display = 'block';
-        } else {
-            // Recreate the welcome container if it was completely removed
-            const wc = document.createElement('div');
-            wc.id = 'welcome-container';
-            wc.innerHTML = `
-              <div class="message model-message">
-                <div class="message-content">
-                  <p>Welcome to Friendly MBBS AI! I'm here to provide general health and wellness information.</p>
-                  <p><b>Important:</b> I am an AI assistant, not a doctor. My advice is for informational purposes only. Please consult a licensed medical professional for diagnosis or treatment.</p>
-                </div>
-              </div>
-              <div class="prompt-suggestions" id="prompt-suggestions">
-                  <button class="suggestion-chip">What are symptoms of the flu?</button>
-                  <button class="suggestion-chip">Tell me about paracetamol</button>
-                  <button class="suggestion-chip">Generate an image of a DNA helix</button>
-              </div>
-            `;
-            chatContainer.prepend(wc);
-            welcomeContainer = wc;
-            promptSuggestions = document.getElementById("prompt-suggestions");
         }
     }
 }
@@ -735,11 +787,11 @@ async function openCamera() {
   try {
     cameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
     (cameraView as HTMLVideoElement).srcObject = cameraStream;
-    cameraModal.hidden = false;
+    if (cameraModal) cameraModal.hidden = false;
   } catch (err) {
     console.error("Error accessing camera:", err);
     let msg = "Could not access the camera. Please check permissions.";
-    if (err.name === 'NotAllowedError') msg = "Camera access was denied. Please allow camera permissions in your browser.";
+    if (err.name === 'NotAllowedError') msg = "Camera access was denied. Please allow camera permissions in your browser settings.";
     if (err.name === 'NotFoundError') msg = "No camera found on this device.";
     addMessage("error", msg);
   }
@@ -747,16 +799,22 @@ async function openCamera() {
 
 function closeCamera() {
   if (cameraStream) cameraStream.getTracks().forEach(track => track.stop());
-  cameraModal.hidden = true;
+  if (cameraModal) cameraModal.hidden = true;
 }
 
 function captureImage() {
   const canvas = cameraCanvas as HTMLCanvasElement;
   const video = cameraView as HTMLVideoElement;
+  if (!canvas || !video) return;
+
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
   canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
   canvas.toBlob((blob) => {
+    if(!blob) {
+      addMessage("error", "Failed to capture image from camera.");
+      return;
+    }
     const file = new File([blob], "capture.jpg", { type: "image/jpeg" });
     const dataTransfer = new DataTransfer();
     dataTransfer.items.add(file);
@@ -767,13 +825,13 @@ function captureImage() {
 }
 
 function openImageModal(src) {
-    (imageViewerContent as HTMLImageElement).src = src;
-    imageViewerModal.hidden = false;
+    if(imageViewerContent) (imageViewerContent as HTMLImageElement).src = src;
+    if(imageViewerModal) imageViewerModal.hidden = false;
 }
 
 function closeImageModal() {
-    imageViewerModal.hidden = true;
-    (imageViewerContent as HTMLImageElement).src = "";
+    if(imageViewerModal) imageViewerModal.hidden = true;
+    if(imageViewerContent) (imageViewerContent as HTMLImageElement).src = "";
 }
 
 // --- VOICE INPUT AND VISUALIZER ---
@@ -784,7 +842,13 @@ function toggleVoiceRecognition() {
 }
 
 function startVoiceRecognition() {
-  recognition = new SpeechRecognition();
+  try {
+    recognition = new SpeechRecognition();
+  } catch(e) {
+    addMessage("error", "Speech recognition is not supported by your browser.");
+    return;
+  }
+  
   recognition.continuous = true;
   recognition.interimResults = true;
   recognition.lang = 'en-US';
@@ -799,7 +863,12 @@ function startVoiceRecognition() {
     inputRow.classList.add('input-row--active');
   };
 
-  recognition.onend = () => { if (isRecording) stopVoiceRecognition(); };
+  recognition.onend = () => { 
+    // onend can be called for various reasons, ensure we only stop if we are in a recording state.
+    if (isRecording) {
+      stopVoiceRecognition(); 
+    }
+  };
 
   recognition.onresult = (event) => {
     let interim = '', final = '';
@@ -812,7 +881,13 @@ function startVoiceRecognition() {
 
   recognition.onerror = (event) => {
     console.error("Speech recognition error:", event.error);
-    addMessage("error", `Voice input error: ${event.error}`);
+    let errorMessage = `Voice input error: ${event.error}`;
+    if (event.error === 'no-speech') {
+        errorMessage = "No speech was detected. Please try again.";
+    } else if (event.error === 'not-allowed') {
+        errorMessage = "Microphone access was denied. Please allow microphone permissions in your browser settings.";
+    }
+    addMessage("error", errorMessage);
     stopVoiceRecognition();
   };
 
@@ -820,14 +895,18 @@ function startVoiceRecognition() {
 }
 
 function stopVoiceRecognition() {
-  if (recognition) recognition.stop();
+  if (recognition) {
+    recognition.onend = null; // prevent re-triggering stop
+    recognition.stop();
+    recognition = null;
+  }
   isRecording = false;
-  micIcon.hidden = false;
-  stopIcon.hidden = true;
-  voiceBtn.classList.remove('recording');
-  promptInput.placeholder = "Ask about wellness or medications...";
+  if(micIcon) micIcon.hidden = false;
+  if(stopIcon) stopIcon.hidden = true;
+  if(voiceBtn) voiceBtn.classList.remove('recording');
+  if(promptInput) promptInput.placeholder = "Ask about wellness or medications...";
   stopVisualizer();
-  if (!promptInput.value && !fileUpload.files[0]) {
+  if (promptInput && !promptInput.value && fileUpload && !fileUpload.files[0]) {
     inputRow.classList.remove("input-row--active");
   }
 }
@@ -846,36 +925,41 @@ async function startVisualizer() {
     source.connect(gainNode).connect(analyser);
     promptInput.style.display = 'none';
     visualizerContainer.style.display = 'flex';
-    setTimeout(() => { visualizerContainer.style.opacity = '1'; }, 10);
-    visualizerControls.hidden = false;
+    setTimeout(() => { if(visualizerContainer) visualizerContainer.style.opacity = '1'; }, 10);
+    if(visualizerControls) visualizerControls.hidden = false;
 
     draw();
   } catch (err) {
     console.error('Error accessing microphone for visualizer:', err);
-    addMessage('error', 'Could not access microphone for visualization.');
+    addMessage('error', 'Could not access microphone for visualization. Please check permissions.');
+    stopVoiceRecognition(); // Stop the whole process if visualizer fails
   }
 }
 
 function stopVisualizer() {
   if (animationFrameId) cancelAnimationFrame(animationFrameId);
   if (mediaStream) mediaStream.getTracks().forEach(track => track.stop());
-  if (audioContext) audioContext.close();
+  if (audioContext && audioContext.state !== 'closed') audioContext.close();
   
-  promptInput.style.display = 'block';
-  visualizerContainer.style.opacity = '0';
-  visualizerContainer.style.display = 'none';
-  visualizerControls.hidden = true;
+  if(promptInput) promptInput.style.display = 'block';
+  if(visualizerContainer) {
+    visualizerContainer.style.opacity = '0';
+    visualizerContainer.style.display = 'none';
+  }
+  if(visualizerControls) visualizerControls.hidden = true;
   animationFrameId = null;
   mediaStream = null;
+  audioContext = null;
 }
 
 function draw() {
-  if (!isRecording || !analyser) return;
+  if (!isRecording || !analyser || !dataArray) return;
 
   animationFrameId = requestAnimationFrame(draw);
   analyser.getByteFrequencyData(dataArray);
 
   const canvas = voiceVisualizer as HTMLCanvasElement;
+  if (!canvas) return;
   const canvasCtx = canvas.getContext('2d');
   const { width, height } = canvas;
   const average = dataArray.reduce((s, v) => s + v, 0) / dataArray.length;
@@ -899,7 +983,7 @@ function draw() {
 }
 
 function toggleMute() {
-  if (!gainNode) return;
+  if (!gainNode || !audioContext) return;
   const isMuted = gainNode.gain.value === 0;
   gainNode.gain.setValueAtTime(isMuted ? parseFloat((volumeSlider as HTMLInputElement).value) : 0, audioContext.currentTime);
   unmutedIcon.hidden = !isMuted;
@@ -907,14 +991,14 @@ function toggleMute() {
 }
 
 function changeVolume(event) {
-  if (!gainNode || gainNode.gain.value === 0) return;
+  if (!gainNode || !audioContext || gainNode.gain.value === 0) return;
   gainNode.gain.setValueAtTime(event.target.value, audioContext.currentTime);
 }
 
 // --- AUDIO OUTPUT & PLAYBACK ---
 
 function addAudioControls(messageElement) {
-    if (messageElement.querySelector('.audio-controls')) return;
+    if (!messageElement || messageElement.querySelector('.audio-controls')) return;
 
     const controlsContainer = document.createElement('div');
     controlsContainer.className = 'audio-controls';
@@ -945,16 +1029,17 @@ function addAudioControls(messageElement) {
 
 async function handlePlayPause(messageElement, button) {
     const messageId = messageElement.id;
-    const textToSpeak = messageElement.querySelector('.message-content').textContent;
+    const contentElement = messageElement.querySelector('.message-content');
+    if (!contentElement) return;
+    const textToSpeak = contentElement.textContent;
+    if (!textToSpeak || textToSpeak.trim().length === 0) return;
 
     if (currentAudioMessageId === messageId && currentAudioSource) {
-        // Stop currently playing audio for this message
         currentAudioSource.stop();
         // The onended event will handle cleanup
         return;
     }
 
-    // Stop any other audio that might be playing
     if (currentAudioSource) {
         currentAudioSource.stop();
     }
@@ -983,6 +1068,7 @@ async function generateAndPlayAudio(text, messageId, button) {
     button.disabled = true;
 
     try {
+        if (!ai) throw new Error("AI not initialized.");
         const response = await ai.models.generateContent({
             model: "gemini-2.5-flash-preview-tts",
             contents: [{ parts: [{ text }] }],
@@ -997,7 +1083,7 @@ async function generateAndPlayAudio(text, messageId, button) {
         const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
         if (!base64Audio) throw new Error("No audio data returned from API.");
 
-        if (!outputAudioContext) {
+        if (!outputAudioContext || outputAudioContext.state === 'closed') {
            outputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
         }
         
@@ -1009,7 +1095,7 @@ async function generateAndPlayAudio(text, messageId, button) {
 
     } catch (error) {
         console.error("Error generating or playing audio:", error);
-        addMessage("error", "Sorry, I couldn't generate the audio for this message.");
+        addMessage("error", `Sorry, I couldn't generate the audio: ${getFriendlyErrorMessage(error)}`);
         playIcon.hidden = false;
     } finally {
         loader.hidden = true;
@@ -1019,6 +1105,11 @@ async function generateAndPlayAudio(text, messageId, button) {
 
 function playAudio(audioBuffer, messageId, button) {
     if (!outputAudioContext) return;
+    
+    // Resume context if it was suspended by browser policy
+    if (outputAudioContext.state === 'suspended') {
+        outputAudioContext.resume();
+    }
 
     const source = outputAudioContext.createBufferSource();
     source.buffer = audioBuffer;
@@ -1057,13 +1148,18 @@ function playAudio(audioBuffer, messageId, button) {
 
 
 function decode(base64: string): Uint8Array {
-  const binaryString = atob(base64);
-  const len = binaryString.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
+  try {
+    const binaryString = atob(base64);
+    const len = binaryString.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes;
+  } catch (e) {
+    console.error("Base64 decoding failed:", e);
+    return new Uint8Array(0);
   }
-  return bytes;
 }
 
 async function decodeAudioData(
@@ -1072,6 +1168,8 @@ async function decodeAudioData(
   sampleRate: number,
   numChannels: number,
 ): Promise<AudioBuffer> {
+  // This is a custom raw PCM decoder, as browsers' native decodeAudioData expects a file format header.
+  if (data.length === 0) return ctx.createBuffer(numChannels, 0, sampleRate);
   const dataInt16 = new Int16Array(data.buffer);
   const frameCount = dataInt16.length / numChannels;
   const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
@@ -1079,6 +1177,7 @@ async function decodeAudioData(
   for (let channel = 0; channel < numChannels; channel++) {
     const channelData = buffer.getChannelData(channel);
     for (let i = 0; i < frameCount; i++) {
+      // Normalize from 16-bit signed integer to a float between -1.0 and 1.0
       channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
     }
   }
@@ -1088,7 +1187,7 @@ async function decodeAudioData(
 
 // --- MISC HELPERS ---
 function addFeedbackControls(messageElement) {
-  if (messageElement.querySelector('.image-loader-container') || messageElement.querySelector('.feedback-container')) return;
+  if (!messageElement || messageElement.querySelector('.image-loader-container') || messageElement.querySelector('.feedback-container')) return;
 
   const feedbackContainer = document.createElement('div');
   feedbackContainer.className = 'feedback-container';
@@ -1106,6 +1205,9 @@ function addFeedbackControls(messageElement) {
         copyBtn.innerHTML = copyIcon;
         copyBtn.classList.remove('copied');
       }, 2000);
+    }).catch(err => {
+        console.error("Failed to copy text:", err);
+        addMessage("error", "Could not copy text to clipboard.");
     });
   };
 
@@ -1123,9 +1225,13 @@ function addFeedbackControls(messageElement) {
 }
 
 function handleFeedbackClick(messageId, vote, btnUp, btnDown) {
-  const feedback = JSON.parse(localStorage.getItem('messageFeedback')) || {};
-  feedback[messageId] = vote;
-  localStorage.setItem('messageFeedback', JSON.stringify(feedback));
+  try {
+    const feedback = JSON.parse(localStorage.getItem('messageFeedback')) || {};
+    feedback[messageId] = vote;
+    localStorage.setItem('messageFeedback', JSON.stringify(feedback));
+  } catch(e) {
+    console.warn("Could not save feedback to localStorage.", e);
+  }
 
   btnUp.disabled = true;
   btnDown.disabled = true;
@@ -1134,53 +1240,84 @@ function handleFeedbackClick(messageId, vote, btnUp, btnDown) {
 }
 
 function playAudioCue(type) {
-  const audioCtx = new(window.AudioContext || (window as any).webkitAudioContext)();
-  const osc = audioCtx.createOscillator();
-  const gain = audioCtx.createGain();
-  osc.connect(gain).connect(audioCtx.destination);
-  gain.gain.setValueAtTime(0, audioCtx.currentTime);
-  let duration = 0.3;
+  try {
+    const audioCtx = new(window.AudioContext || (window as any).webkitAudioContext)();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain).connect(audioCtx.destination);
+    gain.gain.setValueAtTime(0, audioCtx.currentTime);
 
-  const ramps = {
-    send: { t: 'sine', f: 500, g: 0.1, r1: 0.05, r2: 0.15, d: 0.2 },
-    receive: { t: 'sine', f: 600, g: 0.08, r1: 0.05, r2: 0.2, d: 0.25 },
-    error: { t: 'square', f: 150, g: 0.1, r1: 0.05, r2: 0.3, d: 0.35 },
-    upload: { t: 'triangle', f: 440, f2: 660, ft: 0.1, g: 0.1, r1: 0.05, r2: 0.25, d: 0.3 },
-    imageGenStart: { t: 'sawtooth', f: 220, g: 0.05, r1: 0.05, r2: 0.4, d: 0.45 },
-    processing: { t: 'sawtooth', f: 100, f2: 150, ft: 0.1, g: 0.04, r1: 0.05, r2: 0.2, d: 0.25 },
-    imageGenSuccess: { t: 'sine', f: 880, f2: 1200, ft: 0.1, g: 0.1, r1: 0.05, r2: 0.2, d: 0.25 },
-  };
+    const ramps = {
+      send: { t: 'sine', f: 500, g: 0.1, r1: 0.05, r2: 0.15, d: 0.2 },
+      receive: { t: 'sine', f: 600, g: 0.08, r1: 0.05, r2: 0.2, d: 0.25 },
+      error: { t: 'square', f: 150, g: 0.1, r1: 0.05, r2: 0.3, d: 0.35 },
+      upload: { t: 'triangle', f: 440, f2: 660, ft: 0.1, g: 0.1, r1: 0.05, r2: 0.25, d: 0.3 },
+      imageGenStart: { t: 'sawtooth', f: 220, g: 0.05, r1: 0.05, r2: 0.4, d: 0.45 },
+      processing: { t: 'sawtooth', f: 100, f2: 150, ft: 0.1, g: 0.04, r1: 0.05, r2: 0.2, d: 0.25 },
+      imageGenSuccess: { t: 'sine', f: 880, f2: 1200, ft: 0.1, g: 0.1, r1: 0.05, r2: 0.2, d: 0.25 },
+    };
 
-  const p = ramps[type];
-  if (!p) return;
-  osc.type = p.t as OscillatorType;
-  osc.frequency.setValueAtTime(p.f, audioCtx.currentTime);
-  if (p.f2) osc.frequency.linearRampToValueAtTime(p.f2, audioCtx.currentTime + p.ft);
-  gain.gain.exponentialRampToValueAtTime(p.g, audioCtx.currentTime + p.r1);
-  gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + p.r2);
-  duration = p.d;
+    const p = ramps[type];
+    if (!p) return;
+    osc.type = p.t as OscillatorType;
+    osc.frequency.setValueAtTime(p.f, audioCtx.currentTime);
+    if (p.f2) osc.frequency.linearRampToValueAtTime(p.f2, audioCtx.currentTime + p.ft);
+    gain.gain.exponentialRampToValueAtTime(p.g, audioCtx.currentTime + p.r1);
+    gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + p.r2);
 
-  osc.start(audioCtx.currentTime);
-  osc.stop(audioCtx.currentTime + duration);
+    osc.start(audioCtx.currentTime);
+    osc.stop(audioCtx.currentTime + p.d);
+  } catch (e) {
+    console.warn("Could not play audio cue.", e);
+  }
 }
 
 function getFriendlyErrorMessage(error) {
-  const msg = error.toString();
+  const msg = error?.toString() || "An unknown error occurred.";
   if (msg.includes('API key not valid')) return 'API Key Error: Please ensure your API key is configured correctly.';
   if (msg.includes('fetch') || msg.includes('NetworkError')) return 'Network Error: Please check your internet connection.';
-  if (msg.includes('429')) return 'Rate Limit Exceeded: Please wait a moment before sending another request.';
-  if (msg.includes('500')) return 'Server Error: The service is temporarily unavailable. Please try again later.';
-  if (msg.includes('[SAFETY]')) return 'Content Moderation: The response was blocked due to safety settings. Please rephrase your prompt.';
+  if (msg.includes('400') || msg.includes('Invalid argument')) return 'Invalid Request: The data sent to the AI was invalid. Please try again.';
+  if (msg.includes('429')) return 'Rate Limit Exceeded: The service is busy. Please wait a moment before sending another request.';
+  if (msg.includes('500') || msg.includes('503')) return 'Server Error: The AI service is temporarily unavailable. Please try again later.';
+  if (msg.includes('[SAFETY]') || msg.includes('blocked by safety')) return 'Content Moderation: The request or response was blocked due to safety settings. Please rephrase your prompt.';
   return 'An unexpected error occurred. Please see the console for details.';
 }
 
 function isResponseInsufficient(text) {
+  if (text === null || text === undefined) return true;
   const trimmedText = text.trim();
   if (trimmedText.length === 0) return true;
-  const patterns = [ /\[Wellness Guide\]/gi, /\[Advisory Notice\].*?issues\./gi, /\[🚨 IMMEDIATE DANGER ALERT\].*?NOW\./gi, /Full Disclaimer A: WELLNESS ADVISORY.*?treatment\./gis, /Full Disclaimer B: CRITICAL HEALTH WARNING.*?immediately\./gis, /Full Disclaimer C \(Refusal\).*?active\.\)/gis, /I am a safety-first, ethical AI.*?professional immediately\./gis, /I (am unable to|cannot|can't) (provide|answer|fulfill|generate|give|assist with|create content of that nature)/gi, /as an AI,? I am not able to/gi, /I do not have the ability to/gi, /(for your safety|due to my safety guidelines|as a safety precaution|based on my safety policies)/gi, /I'm sorry, but I cannot/gi, /Unfortunately, I am unable to/gi, /My apologies, but I'm not supposed to/gi, /I must decline this request/gi, /It is outside of my capabilities to/gi, /I am not designed to/gi, /As a large language model/gi, /My instructions prevent me from/gi, /That request goes against my safety policies/gi, /I'm unable to provide information on that topic/gi, /cannot provide specific medical advice/gi, /crucial to consult with a qualified healthcare provider/gi, /My purpose is to provide general information and not to replace professional medical advice/gi, /I am not a medical professional/gi, /It is important to seek advice from a medical professional/gi, /Please consult your doctor or pharmacist/gi, /This information is for educational purposes only/gi, /I am only an AI assistant/gi, /However, I can't give you medical advice/gi, /This information should not be used as a substitute for professional medical advice, diagnosis, or treatment\./gi, /Always seek the advice of your physician or other qualified health provider/gi, /If you are in a crisis or may have an emergency, please call your local emergency services immediately\./gi, /I cannot assist with that as it falls outside my safety guidelines\./gi, /I must emphasize that I am an AI/gi, ];
-  const combinedPattern = new RegExp(patterns.map(p => `(${p.source})`).join('|'), 'gi');
-  if (!combinedPattern.test(trimmedText)) return false;
+  // This list checks for common refusal patterns and disclaimer-only responses.
+  const patterns = [
+      /\[Wellness Guide\]/gi, /\[Advisory Notice\].*?issues\./gi, /\[🚨 IMMEDIATE DANGER ALERT\].*?NOW\./gi,
+      /Full Disclaimer A: WELLNESS ADVISORY.*?treatment\./gis,
+      /Full Disclaimer B: CRITICAL HEALTH WARNING.*?immediately\./gis,
+      /Full Disclaimer C \(Refusal\).*?active\.\)/gis,
+      /I am a safety-first, ethical AI.*?professional immediately\./gis,
+      /I (am unable to|cannot|can't) (provide|answer|fulfill|generate|give|assist with|create content of that nature)/gi,
+      /as an AI,? I am not able to/gi, /I do not have the ability to/gi,
+      /(for your safety|due to my safety guidelines|as a safety precaution|based on my safety policies)/gi,
+      /I'm sorry, but I cannot/gi, /Unfortunately, I am unable to/gi,
+      /My apologies, but I'm not supposed to/gi, /I must decline this request/gi,
+      /It is outside of my capabilities to/gi, /I am not designed to/gi,
+      /As a large language model/gi, /My instructions prevent me from/gi,
+      /That request goes against my safety policies/gi, /I'm unable to provide information on that topic/gi,
+      /cannot provide specific medical advice/gi, /crucial to consult with a qualified healthcare provider/gi,
+      /My purpose is to provide general information and not to replace professional medical advice/gi,
+      /I am not a medical professional/gi, /It is important to seek advice from a medical professional/gi,
+      /Please consult your doctor or pharmacist/gi, /This information is for educational purposes only/gi,
+      /I am only an AI assistant/gi, /However, I can't give you medical advice/gi,
+      /This information should not be used as a substitute for professional medical advice, diagnosis, or treatment\./gi,
+      /Always seek the advice of your physician or other qualified health provider/gi,
+      /If you are in a crisis or may have an emergency, please call your local emergency services immediately\./gi,
+      /I cannot assist with that as it falls outside my safety guidelines\./gi,
+      /I must emphasize that I am an AI/gi,
+  ];
+  
   let substantiveContent = trimmedText;
-  for (const p of patterns) { substantiveContent = substantiveContent.replace(p, ''); }
+  for (const p of patterns) { 
+      substantiveContent = substantiveContent.replace(p, ''); 
+  }
+  // If after removing all disclaimers and refusals, there's very little text left, it's insufficient.
   return substantiveContent.trim().length < 25;
 }
