@@ -80,7 +80,6 @@ let chatHistory = [];
 
 let isRecording = false;
 let recognition;
-// FIX: Cast window to any to access browser-specific SpeechRecognition APIs.
 const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
 // Audio visualizer state
@@ -93,13 +92,24 @@ let gainNode;
 let mediaStream;
 let cameraStream;
 
+// --- Audio Playback State ---
+let currentAudioSource: AudioBufferSourceNode | null = null;
+let currentGainNode: GainNode | null = null;
+let currentAudioMessageId: string | null = null;
+const audioBuffersCache: { [key: string]: AudioBuffer } = {};
+let outputAudioContext: AudioContext | null = null;
+
+
 // --- DOM ELEMENTS ---
 let chatContainer, chatForm, submitBtn, promptInput, sendIcon, loader,
   uploadBtn, fileUpload, filePreview, voiceBtn, micIcon, stopIcon,
   inputRow, voiceVisualizer, visualizerContainer,
   visualizerControls, muteBtn, unmutedIcon, mutedIcon, volumeSlider,
   cameraBtn, cameraModal, cameraView, cameraCanvas, captureBtn, closeCameraBtn,
-  imageGenBtn;
+  imageGenBtn, themeToggleBtn, sunIcon, moonIcon, newChatBtn, welcomeContainer,
+  promptSuggestions, imageViewerModal, imageViewerContent, closeImageViewerBtn,
+  hljsTheme;
+
 
 // --- INITIALIZATION ---
 document.addEventListener("DOMContentLoaded", () => {
@@ -131,7 +141,16 @@ document.addEventListener("DOMContentLoaded", () => {
   captureBtn = document.getElementById("capture-btn");
   closeCameraBtn = document.getElementById("close-camera-btn");
   imageGenBtn = document.getElementById("image-gen-btn");
-
+  themeToggleBtn = document.getElementById("theme-toggle-btn");
+  sunIcon = themeToggleBtn.querySelector(".sun-icon");
+  moonIcon = themeToggleBtn.querySelector(".moon-icon");
+  newChatBtn = document.getElementById("new-chat-btn");
+  welcomeContainer = document.getElementById("welcome-container");
+  promptSuggestions = document.getElementById("prompt-suggestions");
+  imageViewerModal = document.getElementById("image-viewer-modal");
+  imageViewerContent = document.getElementById("image-viewer-content");
+  closeImageViewerBtn = document.querySelector(".close-image-viewer");
+  hljsTheme = document.getElementById("hljs-theme");
 
   // Initialize chat
   initChat().catch(err => {
@@ -139,13 +158,9 @@ document.addEventListener("DOMContentLoaded", () => {
     console.error(err);
   });
 
-  // Setup event listeners
   setupEventListeners();
-
-  // Start onboarding tour if it's the first visit
-  if (!localStorage.getItem('onboardingTourCompleted')) {
-    startOnboardingTour();
-  }
+  applyInitialTheme();
+  loadChatHistory();
 });
 
 function setupEventListeners() {
@@ -165,7 +180,6 @@ function setupEventListeners() {
   });
 
   promptInput.addEventListener("keydown", (e) => {
-    // Send on Enter (but not Shift+Enter) OR on Ctrl+Enter
     if (e.key === "Enter" && (e.ctrlKey || !e.shiftKey)) {
       e.preventDefault();
       sendMessage();
@@ -175,12 +189,32 @@ function setupEventListeners() {
   uploadBtn.addEventListener("click", () => fileUpload.click());
   fileUpload.addEventListener("change", handleFileUpload);
   imageGenBtn.addEventListener("click", () => sendMessage(true));
+  
+  // Header actions
+  themeToggleBtn.addEventListener("click", toggleTheme);
+  newChatBtn.addEventListener("click", startNewChat);
 
+  // Prompt suggestions
+  promptSuggestions.addEventListener('click', (e) => {
+    const target = e.target as HTMLButtonElement;
+    if (target.classList.contains('suggestion-chip')) {
+        promptInput.value = target.textContent;
+        sendMessage();
+    }
+  });
 
   // Camera
   cameraBtn.addEventListener("click", openCamera);
   closeCameraBtn.addEventListener("click", closeCamera);
   captureBtn.addEventListener("click", captureImage);
+  
+  // Image Viewer
+  closeImageViewerBtn.addEventListener("click", closeImageModal);
+  imageViewerModal.addEventListener("click", (e) => {
+    if (e.target === imageViewerModal) {
+      closeImageModal();
+    }
+  });
 
 
   // Voice recognition
@@ -216,6 +250,10 @@ async function sendMessage(generateImage = false) {
   const file = fileUpload.files[0];
 
   if (!prompt && !file) return;
+
+  if (welcomeContainer) {
+    welcomeContainer.style.display = 'none';
+  }
 
   playAudioCue('send');
   if (prompt) {
@@ -258,7 +296,6 @@ async function generateTextFromPrompt(userParts) {
     parts: userParts
   };
   let currentResponse = "";
-  // Display the typing indicator message immediately.
   let messageElement = addMessage("model", "", true);
 
   playAudioCue('processing');
@@ -276,15 +313,13 @@ async function generateTextFromPrompt(userParts) {
     });
 
     let lastChunk = null;
-    let hasReceivedText = false; // To track if we've started receiving text
+    let hasReceivedText = false;
     for await (const chunk of resultStream) {
       lastChunk = chunk;
       const chunkText = chunk.text;
       if (chunkText) {
         if (!hasReceivedText) {
-          // This is the first chunk of text.
           playAudioCue('receive');
-          // Clear the typing indicator from the message content.
           messageElement.querySelector('.message-content').innerHTML = '';
           hasReceivedText = true;
         }
@@ -306,7 +341,6 @@ async function generateTextFromPrompt(userParts) {
       }
     }
 
-    // After the loop, if we never received any text, remove the indicator bubble.
     if (!hasReceivedText && messageElement) {
       messageElement.remove();
     }
@@ -318,13 +352,8 @@ async function generateTextFromPrompt(userParts) {
       }
     }
 
-
     if (isResponseInsufficient(currentResponse)) {
-      if (messageElement) {
-        messageElement.remove();
-      }
-      // Only show the insufficient response message if we actually got some text.
-      // If we got no text, we already removed the bubble, so don't add an error.
+      if (messageElement) messageElement.remove();
       if (hasReceivedText) {
         addMessage(
           "error",
@@ -334,6 +363,7 @@ async function generateTextFromPrompt(userParts) {
     } else {
       if (hasReceivedText && messageElement) {
         addFeedbackControls(messageElement);
+        addAudioControls(messageElement);
         chatHistory.push(userContent);
         chatHistory.push({
           role: 'model',
@@ -341,14 +371,12 @@ async function generateTextFromPrompt(userParts) {
             text: currentResponse
           }]
         });
+        saveChatHistory();
       }
     }
 
   } catch (error) {
-    // If an error occurs, ensure the typing indicator message is removed.
-    if (messageElement) {
-      messageElement.remove();
-    }
+    if (messageElement) messageElement.remove();
     const friendlyError = getFriendlyErrorMessage(error);
     addMessage("error", `An error occurred: ${friendlyError}`);
     console.error("Error during generateContentStream:", error);
@@ -356,7 +384,6 @@ async function generateTextFromPrompt(userParts) {
     setLoading(false);
   }
 }
-
 
 async function generateImageFromPrompt(userParts) {
   let messageElement = addMessage("model", "", false, true);
@@ -412,6 +439,7 @@ async function generateImageFromPrompt(userParts) {
             parts: modelResponseParts
           });
           imageFound = true;
+          saveChatHistory();
           break;
         }
       }
@@ -433,7 +461,7 @@ async function generateImageFromPrompt(userParts) {
 
 // --- UI AND UX FUNCTIONS ---
 
-function addMessage(role, text, isStreaming = false, isImageLoading = false) {
+function addMessage(role, textOrParts, isStreaming = false, isImageLoading = false) {
   const messageId = `msg-${Date.now()}-${Math.random()}`;
   const messageWrapper = document.createElement("div");
   messageWrapper.className = `message ${role}-message`;
@@ -450,28 +478,41 @@ function addMessage(role, text, isStreaming = false, isImageLoading = false) {
       </div>
     `;
   } else if (isStreaming && role === 'model') {
-    // Add a placeholder for streaming content (typing indicator)
     messageContent.innerHTML = `
       <div class="typing-indicator">
-        <span></span>
-        <span></span>
-        <span></span>
+        <span></span><span></span><span></span>
       </div>
     `;
-  } else if (text) {
+  } else {
     if (role === 'model') {
-      messageContent.innerHTML = marked.parse(text);
-    } else {
+        const text = (Array.isArray(textOrParts) ? textOrParts.find(p => 'text' in p)?.text : textOrParts) || "";
+        const imagePart = (Array.isArray(textOrParts) ? textOrParts.find(p => 'inlineData' in p)?.inlineData : null);
+        if(text) {
+          messageContent.innerHTML = marked.parse(text);
+        }
+        if(imagePart) {
+          const imageUrl = `data:${imagePart.mimeType};base64,${imagePart.data}`;
+          const img = document.createElement('img');
+          img.src = imageUrl;
+          img.alt = "Generated image";
+          messageContent.appendChild(img);
+        }
+
+    } else if (role === 'user') {
       const p = document.createElement('p');
-      p.textContent = text;
+      p.textContent = textOrParts as string;
       messageContent.appendChild(p);
+    } else if (role === 'error') {
+      playAudioCue('error');
+      messageWrapper.classList.add('error-message');
+      messageContent.textContent = textOrParts as string;
     }
-  } else if (role === 'error') {
-    playAudioCue('error');
-    messageWrapper.classList.add('error-message');
-    messageContent.textContent = text;
   }
 
+  // Make images clickable
+  messageContent.querySelectorAll('img').forEach(img => {
+      img.addEventListener('click', () => openImageModal(img.src));
+  });
 
   const timestamp = document.createElement('span');
   timestamp.className = 'timestamp';
@@ -486,8 +527,11 @@ function addMessage(role, text, isStreaming = false, isImageLoading = false) {
   chatContainer.appendChild(messageWrapper);
   chatContainer.scrollTop = chatContainer.scrollHeight;
 
-  // Add feedback controls if it's a complete model message
   if (role === 'model' && !isStreaming && !isImageLoading) {
+    const textPart = Array.isArray(textOrParts) ? textOrParts.find(p => 'text' in p) : textOrParts;
+    if(textPart){
+       addAudioControls(messageWrapper);
+    }
     addFeedbackControls(messageWrapper);
   }
 
@@ -496,20 +540,12 @@ function addMessage(role, text, isStreaming = false, isImageLoading = false) {
 
 function appendSources(messageElement, groundingChunks) {
   const webChunks = groundingChunks.filter(chunk => chunk.web && chunk.web.uri);
-
-  if (webChunks.length === 0) {
-    return;
-  }
+  if (webChunks.length === 0) return;
 
   const sourcesContainer = document.createElement('div');
   sourcesContainer.className = 'sources-container';
-
-  const title = document.createElement('h4');
-  title.textContent = 'Sources';
-  sourcesContainer.appendChild(title);
-
+  sourcesContainer.innerHTML = '<h4>Sources</h4>';
   const list = document.createElement('ol');
-
   webChunks.forEach(chunk => {
     const listItem = document.createElement('li');
     const link = document.createElement('a');
@@ -520,37 +556,27 @@ function appendSources(messageElement, groundingChunks) {
     listItem.appendChild(link);
     list.appendChild(listItem);
   });
-
   sourcesContainer.appendChild(list);
   messageElement.querySelector('.message-content').appendChild(sourcesContainer);
   chatContainer.scrollTop = chatContainer.scrollHeight;
 }
 
-
 function setLoading(isLoading) {
-  submitBtn.disabled = isLoading;
-  imageGenBtn.disabled = isLoading;
-  uploadBtn.disabled = isLoading;
-  voiceBtn.disabled = isLoading;
-  cameraBtn.disabled = isLoading;
+  const buttonsToDisable = [submitBtn, imageGenBtn, uploadBtn, voiceBtn, cameraBtn, newChatBtn];
+  buttonsToDisable.forEach(btn => btn.disabled = isLoading);
+  
   promptInput.disabled = isLoading;
   (sendIcon as HTMLElement).hidden = isLoading;
   (loader as HTMLElement).hidden = !isLoading;
   (imageGenBtn as HTMLElement).style.display = isLoading ? 'none' : 'flex';
-  (submitBtn as HTMLElement).style.display = 'flex';
-
 
   if (isLoading) {
     chatContainer.setAttribute('aria-busy', 'true');
-    loader.setAttribute('aria-label', 'AI is generating a response');
   } else {
     chatContainer.removeAttribute('aria-busy');
-    loader.setAttribute('aria-label', 'Loading');
-    (imageGenBtn as HTMLElement).style.display = 'flex';
     clearInput();
   }
 }
-
 
 function clearInput() {
   promptInput.value = "";
@@ -563,31 +589,32 @@ function clearInput() {
 }
 
 // --- FILE HANDLING ---
-
 function handleFileUpload() {
   const file = fileUpload.files[0];
   if (!file) {
     filePreview.hidden = true;
-    (promptInput as HTMLTextAreaElement).placeholder = 'Ask about wellness or medications...';
     return;
+  }
+  if (welcomeContainer) {
+    welcomeContainer.style.display = 'none';
   }
 
   playAudioCue('upload');
-  filePreview.innerHTML = ""; // Clear previous preview
+  filePreview.innerHTML = "";
   filePreview.hidden = false;
   inputRow.classList.add('input-row--active');
-  (promptInput as HTMLTextAreaElement).placeholder = 'Ask about the file and your wellness...';
+  (promptInput as HTMLTextAreaElement).placeholder = 'Ask about the file...';
 
   const removeBtn = document.createElement('button');
   removeBtn.className = 'remove-preview-btn';
   removeBtn.innerHTML = '&times;';
-  removeBtn.setAttribute('aria-label', 'Remove attached file');
   removeBtn.onclick = () => {
     fileUpload.value = "";
     filePreview.hidden = true;
-    filePreview.innerHTML = "";
     (promptInput as HTMLTextAreaElement).placeholder = 'Ask about wellness or medications...';
-    inputRow.classList.remove('input-row--active');
+    if (!promptInput.value) {
+      inputRow.classList.remove('input-row--active');
+    }
   };
 
   if (file.type.startsWith('image/')) {
@@ -596,15 +623,10 @@ function handleFileUpload() {
     img.onload = () => URL.revokeObjectURL(img.src);
     filePreview.appendChild(img);
   } else {
-    const fileInfo = document.createElement('div');
-    fileInfo.className = 'file-info-preview';
-    fileInfo.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="24" height="24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zM6 20V4h7v5h5v11H6z"></path></svg> <span>${file.name}</span>`;
-    filePreview.appendChild(fileInfo);
+    filePreview.innerHTML = `<div class="file-info-preview"><span>${file.name}</span></div>`;
   }
-
   filePreview.appendChild(removeBtn);
 }
-
 
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
@@ -615,45 +637,116 @@ function fileToBase64(file) {
   });
 }
 
+// --- THEME MANAGEMENT ---
+function applyInitialTheme() {
+    const savedTheme = localStorage.getItem('theme') || 'light';
+    document.body.dataset.theme = savedTheme;
+    updateThemeToggle(savedTheme);
+}
+
+function toggleTheme() {
+    const currentTheme = document.body.dataset.theme || 'light';
+    const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+    document.body.dataset.theme = newTheme;
+    localStorage.setItem('theme', newTheme);
+    updateThemeToggle(newTheme);
+}
+
+function updateThemeToggle(theme) {
+    if (theme === 'dark') {
+        sunIcon.hidden = true;
+        moonIcon.hidden = false;
+        hljsTheme.href = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css";
+
+    } else {
+        sunIcon.hidden = false;
+        moonIcon.hidden = true;
+        hljsTheme.href = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-light.min.css";
+    }
+}
+
+// --- CHAT HISTORY MANAGEMENT ---
+function saveChatHistory() {
+  localStorage.setItem('chatHistory', JSON.stringify(chatHistory));
+}
+
+function loadChatHistory() {
+    const savedHistory = localStorage.getItem('chatHistory');
+    if (savedHistory) {
+        chatHistory = JSON.parse(savedHistory);
+        chatContainer.innerHTML = ''; // Clear welcome message
+        chatHistory.forEach(message => {
+            if (message.role === 'user') {
+                addMessage('user', message.parts.find(p => 'text' in p)?.text || "");
+            } else if (message.role === 'model') {
+                addMessage('model', message.parts);
+            }
+        });
+
+        if(chatHistory.length > 0 && welcomeContainer) {
+            welcomeContainer.style.display = 'none';
+        }
+    }
+}
+
+function startNewChat() {
+    if (confirm("Are you sure you want to start a new chat? Your current conversation will be cleared.")) {
+        chatHistory = [];
+        localStorage.removeItem('chatHistory');
+        chatContainer.innerHTML = '';
+        if (welcomeContainer) {
+          welcomeContainer.style.display = 'block';
+        } else {
+            // Recreate the welcome container if it was completely removed
+            const wc = document.createElement('div');
+            wc.id = 'welcome-container';
+            wc.innerHTML = `
+              <div class="message model-message">
+                <div class="message-content">
+                  <p>Welcome to Friendly MBBS AI! I'm here to provide general health and wellness information.</p>
+                  <p><b>Important:</b> I am an AI assistant, not a doctor. My advice is for informational purposes only. Please consult a licensed medical professional for diagnosis or treatment.</p>
+                </div>
+              </div>
+              <div class="prompt-suggestions" id="prompt-suggestions">
+                  <button class="suggestion-chip">What are symptoms of the flu?</button>
+                  <button class="suggestion-chip">Tell me about paracetamol</button>
+                  <button class="suggestion-chip">Generate an image of a DNA helix</button>
+              </div>
+            `;
+            chatContainer.prepend(wc);
+            welcomeContainer = wc;
+            promptSuggestions = document.getElementById("prompt-suggestions");
+        }
+    }
+}
+
+
 // --- KEYBOARD SHORTCUTS ---
 function handleGlobalKeyDown(e) {
-  // Close camera modal with Escape key
   if (e.key === 'Escape') {
-    if (cameraModal && !cameraModal.hidden) {
-      closeCamera();
-    }
+    if (cameraModal && !cameraModal.hidden) closeCamera();
+    if (imageViewerModal && !imageViewerModal.hidden) closeImageModal();
   }
 }
 
-// --- CAMERA ---
+// --- MODALS (CAMERA & IMAGE VIEWER) ---
 async function openCamera() {
-  if (cameraStream) {
-    cameraStream.getTracks().forEach(track => track.stop());
-  }
+  if (cameraStream) cameraStream.getTracks().forEach(track => track.stop());
   try {
-    cameraStream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: 'environment'
-      }
-    });
+    cameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
     (cameraView as HTMLVideoElement).srcObject = cameraStream;
     cameraModal.hidden = false;
   } catch (err) {
     console.error("Error accessing camera:", err);
-    let errorMessage = "Could not access the camera. Please check your connection and browser permissions.";
-    if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-      errorMessage = "Camera access was denied. To use this feature, please allow camera permissions in your browser's site settings.";
-    } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-      errorMessage = "No camera found on this device. Please ensure a camera is connected and enabled.";
-    }
-    addMessage("error", errorMessage);
+    let msg = "Could not access the camera. Please check permissions.";
+    if (err.name === 'NotAllowedError') msg = "Camera access was denied. Please allow camera permissions in your browser.";
+    if (err.name === 'NotFoundError') msg = "No camera found on this device.";
+    addMessage("error", msg);
   }
 }
 
 function closeCamera() {
-  if (cameraStream) {
-    cameraStream.getTracks().forEach(track => track.stop());
-  }
+  if (cameraStream) cameraStream.getTracks().forEach(track => track.stop());
   cameraModal.hidden = true;
 }
 
@@ -662,35 +755,32 @@ function captureImage() {
   const video = cameraView as HTMLVideoElement;
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
-  const context = canvas.getContext('2d');
-  context.drawImage(video, 0, 0, canvas.width, canvas.height);
-
+  canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
   canvas.toBlob((blob) => {
-    const file = new File([blob], "capture.jpg", {
-      type: "image/jpeg"
-    });
+    const file = new File([blob], "capture.jpg", { type: "image/jpeg" });
     const dataTransfer = new DataTransfer();
     dataTransfer.items.add(file);
     fileUpload.files = dataTransfer.files;
-
-    // Manually trigger the change event
-    const event = new Event('change', {
-      bubbles: true
-    });
-    fileUpload.dispatchEvent(event);
-
+    fileUpload.dispatchEvent(new Event('change', { bubbles: true }));
     closeCamera();
   }, 'image/jpeg');
+}
+
+function openImageModal(src) {
+    (imageViewerContent as HTMLImageElement).src = src;
+    imageViewerModal.hidden = false;
+}
+
+function closeImageModal() {
+    imageViewerModal.hidden = true;
+    (imageViewerContent as HTMLImageElement).src = "";
 }
 
 // --- VOICE INPUT AND VISUALIZER ---
 
 function toggleVoiceRecognition() {
-  if (isRecording) {
-    stopVoiceRecognition();
-  } else {
-    startVoiceRecognition();
-  }
+  if (isRecording) stopVoiceRecognition();
+  else startVoiceRecognition();
 }
 
 function startVoiceRecognition() {
@@ -709,23 +799,15 @@ function startVoiceRecognition() {
     inputRow.classList.add('input-row--active');
   };
 
-  recognition.onend = () => {
-    if (isRecording) { // Avoid calling stop again if it was manually stopped
-      stopVoiceRecognition();
-    }
-  };
+  recognition.onend = () => { if (isRecording) stopVoiceRecognition(); };
 
   recognition.onresult = (event) => {
-    let interimTranscript = '';
-    let finalTranscript = '';
+    let interim = '', final = '';
     for (let i = event.resultIndex; i < event.results.length; ++i) {
-      if (event.results[i].isFinal) {
-        finalTranscript += event.results[i][0].transcript;
-      } else {
-        interimTranscript += event.results[i][0].transcript;
-      }
+      if (event.results[i].isFinal) final += event.results[i][0].transcript;
+      else interim += event.results[i][0].transcript;
     }
-    promptInput.value = finalTranscript + interimTranscript;
+    promptInput.value = final + interim;
   };
 
   recognition.onerror = (event) => {
@@ -738,9 +820,7 @@ function startVoiceRecognition() {
 }
 
 function stopVoiceRecognition() {
-  if (recognition) {
-    recognition.stop();
-  }
+  if (recognition) recognition.stop();
   isRecording = false;
   micIcon.hidden = false;
   stopIcon.hidden = true;
@@ -754,30 +834,19 @@ function stopVoiceRecognition() {
 
 async function startVisualizer() {
   try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: false
-    });
-    // FIX: Cast window to any to access browser-specific webkitAudioContext.
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     audioContext = new(window.AudioContext || (window as any).webkitAudioContext)();
     source = audioContext.createMediaStreamSource(mediaStream);
     analyser = audioContext.createAnalyser();
     gainNode = audioContext.createGain();
 
     analyser.fftSize = 256;
-    const bufferLength = analyser.frequencyBinCount;
-    dataArray = new Uint8Array(bufferLength);
+    dataArray = new Uint8Array(analyser.frequencyBinCount);
 
-    source.connect(gainNode);
-    gainNode.connect(analyser);
-
-    // Swap visibility of input and visualizer
+    source.connect(gainNode).connect(analyser);
     promptInput.style.display = 'none';
     visualizerContainer.style.display = 'flex';
-    // Use a tiny timeout to allow the display property to apply before starting the transition
-    setTimeout(() => {
-        visualizerContainer.style.opacity = '1';
-    }, 10);
+    setTimeout(() => { visualizerContainer.style.opacity = '1'; }, 10);
     visualizerControls.hidden = false;
 
     draw();
@@ -788,22 +857,14 @@ async function startVisualizer() {
 }
 
 function stopVisualizer() {
-  if (animationFrameId) {
-    cancelAnimationFrame(animationFrameId);
-  }
-  if (mediaStream) {
-    mediaStream.getTracks().forEach(track => track.stop());
-  }
-  if (audioContext && audioContext.state !== 'closed') {
-    audioContext.close();
-  }
+  if (animationFrameId) cancelAnimationFrame(animationFrameId);
+  if (mediaStream) mediaStream.getTracks().forEach(track => track.stop());
+  if (audioContext) audioContext.close();
   
-  // Swap back visibility
   promptInput.style.display = 'block';
   visualizerContainer.style.opacity = '0';
   visualizerContainer.style.display = 'none';
   visualizerControls.hidden = true;
-
   animationFrameId = null;
   mediaStream = null;
 }
@@ -816,203 +877,223 @@ function draw() {
 
   const canvas = voiceVisualizer as HTMLCanvasElement;
   const canvasCtx = canvas.getContext('2d');
-  const WIDTH = canvas.width;
-  const HEIGHT = canvas.height;
-
-  // Clear canvas with background color
-  canvasCtx.fillStyle = 'rgb(243, 244, 246)';
-  canvasCtx.fillRect(0, 0, WIDTH, HEIGHT);
-
-  // Calculate average volume
-  const average = dataArray.reduce((sum, value) => sum + value, 0) / dataArray.length;
-
-  // Normalize volume to a 0-1 range for easier use
-  const normalizedVolume = Math.min(average / 150, 1); // Clamp at 1
-
+  const { width, height } = canvas;
+  const average = dataArray.reduce((s, v) => s + v, 0) / dataArray.length;
+  const normalized = Math.min(average / 150, 1);
   const time = Date.now() * 0.005;
+  const totalAmp = 2 + (height / 2.5) * normalized;
 
-  // Define wave properties
-  const waveFrequency = 3; // How many full waves across the canvas
-  const silentAmplitude = 2; // Base amplitude when silent for a gentle pulse
-  const volumeAmplitude = (HEIGHT / 2.5) * normalizedVolume; // Amplitude driven by volume
-  const totalAmplitude = silentAmplitude + volumeAmplitude;
-
-  // Set line style
+  canvasCtx.clearRect(0, 0, width, height);
   canvasCtx.lineWidth = 2;
-  canvasCtx.strokeStyle = 'rgb(59, 130, 246)';
+  canvasCtx.strokeStyle = getComputedStyle(document.body).getPropertyValue('--accent-primary').trim();
   canvasCtx.beginPath();
-  canvasCtx.moveTo(0, HEIGHT / 2);
+  canvasCtx.moveTo(0, height / 2);
 
-  for (let x = 0; x < WIDTH; x++) {
-    // Main wave calculation
-    const angle = (x / WIDTH) * Math.PI * 2 * waveFrequency + time;
-    const y = Math.sin(angle) * totalAmplitude;
-
-    // Add some high-frequency "jitter" based on specific frequency bins for texture
-    const jitterIndex = Math.floor((x / WIDTH) * dataArray.length);
-    const jitter = (dataArray[jitterIndex] / 255 - 0.5) * 15 * normalizedVolume;
-    
-    canvasCtx.lineTo(x, HEIGHT / 2 + y + jitter);
+  for (let x = 0; x < width; x++) {
+    const angle = (x / width) * Math.PI * 6 + time;
+    const y = Math.sin(angle) * totalAmp;
+    const jitter = (dataArray[Math.floor((x / width) * dataArray.length)] / 255 - 0.5) * 15 * normalized;
+    canvasCtx.lineTo(x, height / 2 + y + jitter);
   }
-
   canvasCtx.stroke();
 }
-
 
 function toggleMute() {
   if (!gainNode) return;
   const isMuted = gainNode.gain.value === 0;
-  if (isMuted) {
-    gainNode.gain.setValueAtTime(parseFloat((volumeSlider as HTMLInputElement).value), audioContext.currentTime);
-    unmutedIcon.hidden = false;
-    mutedIcon.hidden = true;
-    muteBtn.setAttribute('aria-label', 'Unmute');
-  } else {
-    gainNode.gain.setValueAtTime(0, audioContext.currentTime);
-    unmutedIcon.hidden = true;
-    mutedIcon.hidden = false;
-    muteBtn.setAttribute('aria-label', 'Mute');
-  }
+  gainNode.gain.setValueAtTime(isMuted ? parseFloat((volumeSlider as HTMLInputElement).value) : 0, audioContext.currentTime);
+  unmutedIcon.hidden = !isMuted;
+  mutedIcon.hidden = isMuted;
 }
 
 function changeVolume(event) {
-  if (!gainNode || gainNode.gain.value === 0) return; // Don't change volume if muted
+  if (!gainNode || gainNode.gain.value === 0) return;
   gainNode.gain.setValueAtTime(event.target.value, audioContext.currentTime);
 }
 
-// --- ONBOARDING TOUR ---
-function startOnboardingTour() {
-  const tourSteps = [{
-    element: '#input-row',
-    title: 'Welcome to Friendly MBBS AI!',
-    content: 'You can type your wellness questions or attach a file using the paperclip icon.',
-    position: 'top'
-  }, {
-    element: '#camera-btn',
-    title: 'Camera Input',
-    content: 'Click here to use your camera to take a picture of a prescription or medication box.',
-    position: 'top'
-  }, {
-    element: '#voice-btn',
-    title: 'Voice Input',
-    content: 'Prefer to speak? Click the microphone to ask your question using your voice.',
-    position: 'top'
-  }, {
-    element: '#image-gen-btn',
-    title: 'NEW: Image Generation',
-    content: 'Want a visual? Type a description and click the ✨ icon to generate a health-related image.',
-    position: 'top'
-  }, {
-    element: '.model-message',
-    title: 'AI Responses',
-    content: 'The AI\'s response will appear here. After a response is complete, you can provide feedback using the thumbs up/down icons.',
-    position: 'bottom'
-  }];
+// --- AUDIO OUTPUT & PLAYBACK ---
 
-  let currentStep = 0;
-  showTourStep(tourSteps, currentStep);
+function addAudioControls(messageElement) {
+    if (messageElement.querySelector('.audio-controls')) return;
+
+    const controlsContainer = document.createElement('div');
+    controlsContainer.className = 'audio-controls';
+
+    const playPauseBtn = document.createElement('button');
+    playPauseBtn.className = 'feedback-btn play-pause-btn';
+    playPauseBtn.setAttribute('aria-label', 'Play audio');
+    playPauseBtn.innerHTML = `<svg class="play-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M8 5v14l11-7z"></path></svg>
+                             <svg class="pause-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16" hidden><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"></path></svg>
+                             <div class="loader audio-loader" hidden></div>`;
+
+    const volumeSlider = document.createElement('input');
+    volumeSlider.type = 'range';
+    volumeSlider.className = 'audio-volume-slider';
+    volumeSlider.min = '0';
+    volumeSlider.max = '1';
+    volumeSlider.step = '0.05';
+    volumeSlider.value = '1';
+    volumeSlider.setAttribute('aria-label', 'Volume');
+
+    playPauseBtn.onclick = () => handlePlayPause(messageElement, playPauseBtn);
+    volumeSlider.oninput = (e) => handleVolumeChange(e.target as HTMLInputElement);
+
+    controlsContainer.append(playPauseBtn, volumeSlider);
+    messageElement.appendChild(controlsContainer);
 }
 
 
-function showTourStep(steps, stepIndex) {
-  // End tour if no more steps
-  if (stepIndex >= steps.length) {
-    endOnboardingTour();
-    return;
-  }
+async function handlePlayPause(messageElement, button) {
+    const messageId = messageElement.id;
+    const textToSpeak = messageElement.querySelector('.message-content').textContent;
 
-  // Remove previous tour element
-  const existingTour = document.querySelector('.tour-popover-wrapper');
-  if (existingTour) existingTour.remove();
-
-  const step = steps[stepIndex];
-  const targetElement = document.querySelector(step.element);
-
-  if (!targetElement) {
-    // If element not found, skip to next step
-    showTourStep(steps, stepIndex + 1);
-    return;
-  }
-
-  const wrapper = document.createElement('div');
-  wrapper.className = 'tour-popover-wrapper';
-
-  const popover = document.createElement('div');
-  popover.className = `tour-popover tour-popover-${step.position}`;
-  popover.innerHTML = `
-        <div class="tour-content">
-            <h4>${step.title}</h4>
-            <p>${step.content}</p>
-        </div>
-        <div class="tour-navigation">
-            ${stepIndex > 0 ? '<button class="tour-btn-prev">Prev</button>' : ''}
-            <button class="tour-btn-next">${stepIndex === steps.length - 1 ? 'Finish' : 'Next'}</button>
-        </div>
-        <button class="tour-btn-close">&times;</button>
-    `;
-
-  document.body.appendChild(wrapper);
-  wrapper.appendChild(popover);
-
-  const targetRect = targetElement.getBoundingClientRect();
-
-  // Position popover
-  if (step.position === 'top') {
-    popover.style.bottom = `${window.innerHeight - targetRect.top + 10}px`;
-  } else {
-    popover.style.top = `${targetRect.bottom + 10}px`;
-  }
-  popover.style.left = `${targetRect.left + (targetRect.width / 2) - (popover.offsetWidth / 2)}px`;
-
-  // Highlight target element
-  targetElement.classList.add('tour-highlight');
-
-  // Event listeners for navigation
-  popover.querySelector('.tour-btn-next').addEventListener('click', () => {
-    targetElement.classList.remove('tour-highlight');
-    showTourStep(steps, stepIndex + 1);
-  });
-
-  if (stepIndex > 0) {
-    popover.querySelector('.tour-btn-prev').addEventListener('click', () => {
-      targetElement.classList.remove('tour-highlight');
-      showTourStep(steps, stepIndex - 1);
-    });
-  }
-
-  popover.querySelector('.tour-btn-close').addEventListener('click', () => {
-    targetElement.classList.remove('tour-highlight');
-    endOnboardingTour();
-  });
-
-  wrapper.addEventListener('click', (e) => {
-    if (e.target === wrapper) {
-      targetElement.classList.remove('tour-highlight');
-      endOnboardingTour();
+    if (currentAudioMessageId === messageId && currentAudioSource) {
+        // Stop currently playing audio for this message
+        currentAudioSource.stop();
+        // The onended event will handle cleanup
+        return;
     }
-  });
+
+    // Stop any other audio that might be playing
+    if (currentAudioSource) {
+        currentAudioSource.stop();
+    }
+
+    if (audioBuffersCache[messageId]) {
+        playAudio(audioBuffersCache[messageId], messageId, button);
+    } else {
+        await generateAndPlayAudio(textToSpeak, messageId, button);
+    }
 }
 
-function endOnboardingTour() {
-  const existingTour = document.querySelector('.tour-popover-wrapper');
-  if (existingTour) existingTour.remove();
-  document.querySelectorAll('.tour-highlight').forEach(el => el.classList.remove('tour-highlight'));
-  localStorage.setItem('onboardingTourCompleted', 'true');
+function handleVolumeChange(slider) {
+    if (currentGainNode) {
+        currentGainNode.gain.value = parseFloat(slider.value);
+    }
 }
+
+
+async function generateAndPlayAudio(text, messageId, button) {
+    const playIcon = button.querySelector('.play-icon');
+    const pauseIcon = button.querySelector('.pause-icon');
+    const loader = button.querySelector('.audio-loader');
+
+    playIcon.hidden = true;
+    loader.hidden = false;
+    button.disabled = true;
+
+    try {
+        const response = await ai.models.generateContent({
+            model: "gemini-2.5-flash-preview-tts",
+            contents: [{ parts: [{ text }] }],
+            config: {
+                responseModalities: [Modality.AUDIO],
+                speechConfig: {
+                    voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
+                },
+            },
+        });
+
+        const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+        if (!base64Audio) throw new Error("No audio data returned from API.");
+
+        if (!outputAudioContext) {
+           outputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+        }
+        
+        const audioBytes = decode(base64Audio);
+        const audioBuffer = await decodeAudioData(audioBytes, outputAudioContext, 24000, 1);
+        audioBuffersCache[messageId] = audioBuffer;
+        
+        playAudio(audioBuffer, messageId, button);
+
+    } catch (error) {
+        console.error("Error generating or playing audio:", error);
+        addMessage("error", "Sorry, I couldn't generate the audio for this message.");
+        playIcon.hidden = false;
+    } finally {
+        loader.hidden = true;
+        button.disabled = false;
+    }
+}
+
+function playAudio(audioBuffer, messageId, button) {
+    if (!outputAudioContext) return;
+
+    const source = outputAudioContext.createBufferSource();
+    source.buffer = audioBuffer;
+
+    const gainNode = outputAudioContext.createGain();
+    const volumeSlider = button.parentElement.querySelector('.audio-volume-slider') as HTMLInputElement;
+    gainNode.gain.value = volumeSlider ? parseFloat(volumeSlider.value) : 1;
+    
+    source.connect(gainNode);
+    gainNode.connect(outputAudioContext.destination);
+    source.start(0);
+
+    currentAudioSource = source;
+    currentGainNode = gainNode;
+    currentAudioMessageId = messageId;
+    
+    // UI update
+    button.querySelector('.play-icon').hidden = true;
+    button.querySelector('.pause-icon').hidden = false;
+    button.setAttribute('aria-label', 'Pause audio');
+
+    source.onended = () => {
+        // Reset UI for the button that just finished
+        button.querySelector('.play-icon').hidden = false;
+        button.querySelector('.pause-icon').hidden = true;
+        button.setAttribute('aria-label', 'Play audio');
+        
+        // Clear global state only if this was the active source
+        if (currentAudioMessageId === messageId) {
+            currentAudioSource = null;
+            currentGainNode = null;
+            currentAudioMessageId = null;
+        }
+    };
+}
+
+
+function decode(base64: string): Uint8Array {
+  const binaryString = atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+}
+
+async function decodeAudioData(
+  data: Uint8Array,
+  ctx: AudioContext,
+  sampleRate: number,
+  numChannels: number,
+): Promise<AudioBuffer> {
+  const dataInt16 = new Int16Array(data.buffer);
+  const frameCount = dataInt16.length / numChannels;
+  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
+
+  for (let channel = 0; channel < numChannels; channel++) {
+    const channelData = buffer.getChannelData(channel);
+    for (let i = 0; i < frameCount; i++) {
+      channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
+    }
+  }
+  return buffer;
+}
+
 
 // --- MISC HELPERS ---
 function addFeedbackControls(messageElement) {
-  // Don't add controls to image placeholders
-  if (messageElement.querySelector('.image-loader-container')) {
-    return;
-  }
+  if (messageElement.querySelector('.image-loader-container') || messageElement.querySelector('.feedback-container')) return;
 
   const feedbackContainer = document.createElement('div');
   feedbackContainer.className = 'feedback-container';
-
   const copyBtn = document.createElement('button');
   copyBtn.className = 'feedback-btn copy-btn';
-  copyBtn.setAttribute('aria-label', 'Copy message');
   const copyIcon = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"></path></svg>`;
   const checkIcon = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"></path></svg>`;
   copyBtn.innerHTML = copyIcon;
@@ -1025,27 +1106,19 @@ function addFeedbackControls(messageElement) {
         copyBtn.innerHTML = copyIcon;
         copyBtn.classList.remove('copied');
       }, 2000);
-    }).catch(err => {
-      console.error('Failed to copy text: ', err);
     });
   };
 
-
   const thumbsUpBtn = document.createElement('button');
   thumbsUpBtn.className = 'feedback-btn';
-  thumbsUpBtn.setAttribute('aria-label', 'Good response');
   thumbsUpBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z"></path></svg>`;
-  thumbsUpBtn.onclick = () => handleFeedbackClick(messageElement.id, 'up', thumbsUpBtn, thumbsDownBtn);
-
   const thumbsDownBtn = document.createElement('button');
   thumbsDownBtn.className = 'feedback-btn';
-  thumbsDownBtn.setAttribute('aria-label', 'Bad response');
   thumbsDownBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05c-.09.23-.14.47-.14.73v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L9.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z"></path></svg>`;
+  thumbsUpBtn.onclick = () => handleFeedbackClick(messageElement.id, 'up', thumbsUpBtn, thumbsDownBtn);
   thumbsDownBtn.onclick = () => handleFeedbackClick(messageElement.id, 'down', thumbsUpBtn, thumbsDownBtn);
-
-  feedbackContainer.appendChild(copyBtn);
-  feedbackContainer.appendChild(thumbsUpBtn);
-  feedbackContainer.appendChild(thumbsDownBtn);
+  
+  feedbackContainer.append(copyBtn, thumbsUpBtn, thumbsDownBtn);
   messageElement.appendChild(feedbackContainer);
 }
 
@@ -1056,171 +1129,58 @@ function handleFeedbackClick(messageId, vote, btnUp, btnDown) {
 
   btnUp.disabled = true;
   btnDown.disabled = true;
-
-  if (vote === 'up') {
-    btnUp.classList.add('selected');
-  } else {
-    btnDown.classList.add('selected');
-  }
+  if (vote === 'up') btnUp.classList.add('selected');
+  else btnDown.classList.add('selected');
 }
 
 function playAudioCue(type) {
-  // FIX: Cast window to any to access browser-specific webkitAudioContext.
   const audioCtx = new(window.AudioContext || (window as any).webkitAudioContext)();
-  const oscillator = audioCtx.createOscillator();
-  const gainNode = audioCtx.createGain();
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.connect(gain).connect(audioCtx.destination);
+  gain.gain.setValueAtTime(0, audioCtx.currentTime);
+  let duration = 0.3;
 
-  oscillator.connect(gainNode);
-  gainNode.connect(audioCtx.destination);
-  gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
-  let duration = 0.3; // Default duration
+  const ramps = {
+    send: { t: 'sine', f: 500, g: 0.1, r1: 0.05, r2: 0.15, d: 0.2 },
+    receive: { t: 'sine', f: 600, g: 0.08, r1: 0.05, r2: 0.2, d: 0.25 },
+    error: { t: 'square', f: 150, g: 0.1, r1: 0.05, r2: 0.3, d: 0.35 },
+    upload: { t: 'triangle', f: 440, f2: 660, ft: 0.1, g: 0.1, r1: 0.05, r2: 0.25, d: 0.3 },
+    imageGenStart: { t: 'sawtooth', f: 220, g: 0.05, r1: 0.05, r2: 0.4, d: 0.45 },
+    processing: { t: 'sawtooth', f: 100, f2: 150, ft: 0.1, g: 0.04, r1: 0.05, r2: 0.2, d: 0.25 },
+    imageGenSuccess: { t: 'sine', f: 880, f2: 1200, ft: 0.1, g: 0.1, r1: 0.05, r2: 0.2, d: 0.25 },
+  };
 
-  switch (type) {
-    case 'send':
-      oscillator.type = 'sine';
-      oscillator.frequency.setValueAtTime(500, audioCtx.currentTime);
-      gainNode.gain.exponentialRampToValueAtTime(0.1, audioCtx.currentTime + 0.05);
-      gainNode.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.15);
-      duration = 0.2;
-      break;
-    case 'receive': // For streaming text
-      oscillator.type = 'sine';
-      oscillator.frequency.setValueAtTime(600, audioCtx.currentTime);
-      gainNode.gain.exponentialRampToValueAtTime(0.08, audioCtx.currentTime + 0.05);
-      gainNode.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.2);
-      duration = 0.25;
-      break;
-    case 'error':
-      oscillator.type = 'square';
-      oscillator.frequency.setValueAtTime(150, audioCtx.currentTime);
-      gainNode.gain.exponentialRampToValueAtTime(0.1, audioCtx.currentTime + 0.05);
-      gainNode.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.3);
-      duration = 0.35;
-      break;
-    case 'upload':
-      oscillator.type = 'triangle';
-      oscillator.frequency.setValueAtTime(440, audioCtx.currentTime);
-      oscillator.frequency.setValueAtTime(660, audioCtx.currentTime + 0.1);
-      gainNode.gain.exponentialRampToValueAtTime(0.1, audioCtx.currentTime + 0.05);
-      gainNode.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.25);
-      duration = 0.3;
-      break;
-    case 'imageGenStart':
-      oscillator.type = 'sawtooth';
-      oscillator.frequency.setValueAtTime(220, audioCtx.currentTime);
-      gainNode.gain.exponentialRampToValueAtTime(0.05, audioCtx.currentTime + 0.05);
-      gainNode.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.4);
-      duration = 0.45;
-      break;
-    case 'processing': // For AI thinking before text response
-      oscillator.type = 'sawtooth';
-      oscillator.frequency.setValueAtTime(100, audioCtx.currentTime);
-      oscillator.frequency.linearRampToValueAtTime(150, audioCtx.currentTime + 0.1);
-      gainNode.gain.exponentialRampToValueAtTime(0.04, audioCtx.currentTime + 0.05);
-      gainNode.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.2);
-      duration = 0.25;
-      break;
-    case 'imageGenSuccess': // Specific cue for image completion
-      oscillator.type = 'sine';
-      oscillator.frequency.setValueAtTime(880, audioCtx.currentTime);
-      oscillator.frequency.linearRampToValueAtTime(1200, audioCtx.currentTime + 0.1);
-      gainNode.gain.exponentialRampToValueAtTime(0.1, audioCtx.currentTime + 0.05);
-      gainNode.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.2);
-      duration = 0.25;
-      break;
-  }
+  const p = ramps[type];
+  if (!p) return;
+  osc.type = p.t as OscillatorType;
+  osc.frequency.setValueAtTime(p.f, audioCtx.currentTime);
+  if (p.f2) osc.frequency.linearRampToValueAtTime(p.f2, audioCtx.currentTime + p.ft);
+  gain.gain.exponentialRampToValueAtTime(p.g, audioCtx.currentTime + p.r1);
+  gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + p.r2);
+  duration = p.d;
 
-  oscillator.start(audioCtx.currentTime);
-  oscillator.stop(audioCtx.currentTime + duration);
+  osc.start(audioCtx.currentTime);
+  osc.stop(audioCtx.currentTime + duration);
 }
 
-
 function getFriendlyErrorMessage(error) {
-  const message = error.toString();
-  if (message.includes('API key not valid')) {
-    return 'API Key Error: Please ensure your API key is configured correctly.';
-  }
-  if (message.includes('fetch') || message.includes('NetworkError')) {
-    return 'Network Error: Please check your internet connection.';
-  }
-  if (message.includes('429') || message.includes('rate limit')) {
-    return 'Rate Limit Exceeded: Please wait a moment before sending another request.';
-  }
-  if (message.includes('500') || message.includes('server error')) {
-    return 'Server Error: The service is temporarily unavailable. Please try again later.';
-  }
-  if (message.includes('[SAFETY]')) {
-    return 'Content Moderation: The response was blocked due to safety settings. Please rephrase your prompt.';
-  }
+  const msg = error.toString();
+  if (msg.includes('API key not valid')) return 'API Key Error: Please ensure your API key is configured correctly.';
+  if (msg.includes('fetch') || msg.includes('NetworkError')) return 'Network Error: Please check your internet connection.';
+  if (msg.includes('429')) return 'Rate Limit Exceeded: Please wait a moment before sending another request.';
+  if (msg.includes('500')) return 'Server Error: The service is temporarily unavailable. Please try again later.';
+  if (msg.includes('[SAFETY]')) return 'Content Moderation: The response was blocked due to safety settings. Please rephrase your prompt.';
   return 'An unexpected error occurred. Please see the console for details.';
 }
 
 function isResponseInsufficient(text) {
   const trimmedText = text.trim();
-  if (trimmedText.length === 0) {
-    return true; // Always insufficient if empty.
-  }
-
-  const allPatterns = [
-    // Specific Disclaimers from System Prompt
-    /\[Wellness Guide\]/gi,
-    /\[Advisory Notice\].*?issues\./gi,
-    /\[🚨 IMMEDIATE DANGER ALERT\].*?NOW\./gi,
-    /Full Disclaimer A: WELLNESS ADVISORY.*?treatment\./gis,
-    /Full Disclaimer B: CRITICAL HEALTH WARNING.*?immediately\./gis,
-    /Full Disclaimer C \(Refusal\).*?active\.\)/gis,
-    /I am a safety-first, ethical AI.*?professional immediately\./gis,
-
-    // Generic AI Refusal Patterns (Expanded for more robustness)
-    /I (am unable to|cannot|can't) (provide|answer|fulfill|generate|give|assist with|create content of that nature)/gi,
-    /as an AI,? I am not able to/gi,
-    /I do not have the ability to/gi,
-    /(for your safety|due to my safety guidelines|as a safety precaution|based on my safety policies)/gi,
-    /I'm sorry, but I cannot/gi,
-    /Unfortunately, I am unable to/gi,
-    /My apologies, but I'm not supposed to/gi,
-    /I must decline this request/gi,
-    /It is outside of my capabilities to/gi,
-    /I am not designed to/gi,
-    /As a large language model/gi,
-    /My instructions prevent me from/gi,
-    /That request goes against my safety policies/gi,
-    /I'm unable to provide information on that topic/gi,
-    /cannot provide specific medical advice/gi,
-    /crucial to consult with a qualified healthcare provider/gi,
-    /My purpose is to provide general information and not to replace professional medical advice/gi,
-    /I am not a medical professional/gi,
-    /It is important to seek advice from a medical professional/gi,
-    /Please consult your doctor or pharmacist/gi,
-    /This information is for educational purposes only/gi,
-    /I am only an AI assistant/gi,
-    /However, I can't give you medical advice/gi,
-    /This information should not be used as a substitute for professional medical advice, diagnosis, or treatment\./gi,
-    /Always seek the advice of your physician or other qualified health provider/gi,
-    /If you are in a crisis or may have an emergency, please call your local emergency services immediately\./gi,
-    /I cannot assist with that as it falls outside my safety guidelines\./gi,
-    /I must emphasize that I am an AI/gi,
-  ];
-
-  // First, perform a quick check to see if any boilerplate is present at all.
-  const combinedPattern = new RegExp(allPatterns.map(p => `(${p.source})`).join('|'), 'gi');
-  const hasBoilerplate = combinedPattern.test(trimmedText);
-
-  // If no disclaimers or common refusal phrases are found, we assume it's a legitimate,
-  // substantive response, even if it's short. This prevents flagging valid, brief answers.
-  if (!hasBoilerplate) {
-    return false;
-  }
-
-  // If boilerplate *is* found, we proceed with the more thorough check:
-  // Strip out all known boilerplate and see how much actual content remains.
+  if (trimmedText.length === 0) return true;
+  const patterns = [ /\[Wellness Guide\]/gi, /\[Advisory Notice\].*?issues\./gi, /\[🚨 IMMEDIATE DANGER ALERT\].*?NOW\./gi, /Full Disclaimer A: WELLNESS ADVISORY.*?treatment\./gis, /Full Disclaimer B: CRITICAL HEALTH WARNING.*?immediately\./gis, /Full Disclaimer C \(Refusal\).*?active\.\)/gis, /I am a safety-first, ethical AI.*?professional immediately\./gis, /I (am unable to|cannot|can't) (provide|answer|fulfill|generate|give|assist with|create content of that nature)/gi, /as an AI,? I am not able to/gi, /I do not have the ability to/gi, /(for your safety|due to my safety guidelines|as a safety precaution|based on my safety policies)/gi, /I'm sorry, but I cannot/gi, /Unfortunately, I am unable to/gi, /My apologies, but I'm not supposed to/gi, /I must decline this request/gi, /It is outside of my capabilities to/gi, /I am not designed to/gi, /As a large language model/gi, /My instructions prevent me from/gi, /That request goes against my safety policies/gi, /I'm unable to provide information on that topic/gi, /cannot provide specific medical advice/gi, /crucial to consult with a qualified healthcare provider/gi, /My purpose is to provide general information and not to replace professional medical advice/gi, /I am not a medical professional/gi, /It is important to seek advice from a medical professional/gi, /Please consult your doctor or pharmacist/gi, /This information is for educational purposes only/gi, /I am only an AI assistant/gi, /However, I can't give you medical advice/gi, /This information should not be used as a substitute for professional medical advice, diagnosis, or treatment\./gi, /Always seek the advice of your physician or other qualified health provider/gi, /If you are in a crisis or may have an emergency, please call your local emergency services immediately\./gi, /I cannot assist with that as it falls outside my safety guidelines\./gi, /I must emphasize that I am an AI/gi, ];
+  const combinedPattern = new RegExp(patterns.map(p => `(${p.source})`).join('|'), 'gi');
+  if (!combinedPattern.test(trimmedText)) return false;
   let substantiveContent = trimmedText;
-  for (const pattern of allPatterns) {
-    substantiveContent = substantiveContent.replace(pattern, '');
-  }
-
-  // If, after stripping all the boilerplate, the remaining content is negligible,
-  // then the response is considered insufficient.
-  // A threshold of 25 characters is a heuristic for "negligible".
+  for (const p of patterns) { substantiveContent = substantiveContent.replace(p, ''); }
   return substantiveContent.trim().length < 25;
 }
