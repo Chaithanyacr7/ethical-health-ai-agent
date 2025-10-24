@@ -837,8 +837,11 @@ function closeImageModal() {
 // --- VOICE INPUT AND VISUALIZER ---
 
 function toggleVoiceRecognition() {
-  if (isRecording) stopVoiceRecognition();
-  else startVoiceRecognition();
+  if (isRecording) {
+    stopVoiceRecognition();
+  } else {
+    startVoiceRecognition();
+  }
 }
 
 function startVoiceRecognition() {
@@ -864,19 +867,24 @@ function startVoiceRecognition() {
   };
 
   recognition.onend = () => { 
-    // onend can be called for various reasons, ensure we only stop if we are in a recording state.
     if (isRecording) {
       stopVoiceRecognition(); 
     }
   };
 
   recognition.onresult = (event) => {
-    let interim = '', final = '';
+    let interim = '';
+    let final = '';
     for (let i = event.resultIndex; i < event.results.length; ++i) {
-      if (event.results[i].isFinal) final += event.results[i][0].transcript;
-      else interim += event.results[i][0].transcript;
+      if (event.results[i].isFinal) {
+        final += event.results[i][0].transcript;
+      } else {
+        interim += event.results[i][0].transcript;
+      }
     }
     promptInput.value = final + interim;
+    promptInput.style.height = 'auto';
+    promptInput.style.height = (promptInput.scrollHeight) + 'px';
   };
 
   recognition.onerror = (event) => {
@@ -891,20 +899,34 @@ function startVoiceRecognition() {
     stopVoiceRecognition();
   };
 
-  recognition.start();
+  try {
+    recognition.start();
+  } catch (e) {
+    console.error("Could not start speech recognition:", e);
+    addMessage("error", `Could not start voice input: ${e.message}`);
+    stopVoiceRecognition();
+  }
 }
 
 function stopVoiceRecognition() {
   if (recognition) {
-    recognition.onend = null; // prevent re-triggering stop
+    recognition.onend = null;
     recognition.stop();
     recognition = null;
   }
   isRecording = false;
   if(micIcon) micIcon.hidden = false;
-  if(stopIcon) stopIcon.hidden = true;
+  if (stopIcon) {
+    stopIcon.hidden = true;
+    (stopIcon as HTMLElement).style.transform = 'scale(1)'; // Reset transform
+  }
   if(voiceBtn) voiceBtn.classList.remove('recording');
-  if(promptInput) promptInput.placeholder = "Ask about wellness or medications...";
+  if(promptInput) {
+    promptInput.placeholder = "Ask about wellness or medications...";
+    if (promptInput.value.trim()) {
+      sendMessage();
+    }
+  }
   stopVisualizer();
   if (promptInput && !promptInput.value && fileUpload && !fileUpload.files[0]) {
     inputRow.classList.remove("input-row--active");
@@ -931,15 +953,26 @@ async function startVisualizer() {
     draw();
   } catch (err) {
     console.error('Error accessing microphone for visualizer:', err);
-    addMessage('error', 'Could not access microphone for visualization. Please check permissions.');
-    stopVoiceRecognition(); // Stop the whole process if visualizer fails
+    let msg = 'Could not access microphone for visualization. Please check permissions.';
+    if (err.name === 'NotAllowedError') msg = 'Microphone access denied. Please allow microphone permissions in browser settings.';
+    addMessage('error', msg);
+    stopVoiceRecognition();
   }
 }
 
 function stopVisualizer() {
-  if (animationFrameId) cancelAnimationFrame(animationFrameId);
-  if (mediaStream) mediaStream.getTracks().forEach(track => track.stop());
-  if (audioContext && audioContext.state !== 'closed') audioContext.close();
+  if (animationFrameId) {
+    cancelAnimationFrame(animationFrameId);
+    animationFrameId = null;
+  }
+  if (mediaStream) {
+    mediaStream.getTracks().forEach(track => track.stop());
+    mediaStream = null;
+  }
+  if (audioContext && audioContext.state !== 'closed') {
+    audioContext.close();
+    audioContext = null;
+  }
   
   if(promptInput) promptInput.style.display = 'block';
   if(visualizerContainer) {
@@ -947,9 +980,6 @@ function stopVisualizer() {
     visualizerContainer.style.display = 'none';
   }
   if(visualizerControls) visualizerControls.hidden = true;
-  animationFrameId = null;
-  mediaStream = null;
-  audioContext = null;
 }
 
 function draw() {
@@ -964,12 +994,32 @@ function draw() {
   const { width, height } = canvas;
   const average = dataArray.reduce((s, v) => s + v, 0) / dataArray.length;
   const normalized = Math.min(average / 150, 1);
+
+  // Dynamically scale the stop icon based on volume
+  const scale = 1 + normalized * 0.4; // Scale from 1 up to 1.4
+  if (stopIcon) {
+    (stopIcon as HTMLElement).style.transform = `scale(${scale})`;
+  }
+
+  // Dynamically change visualizer color based on volume
+  const primaryColor = getComputedStyle(document.body).getPropertyValue('--accent-primary').trim();
+  const secondaryColor = getComputedStyle(document.body).getPropertyValue('--accent-secondary').trim();
+  const dangerColor = getComputedStyle(document.body).getPropertyValue('--danger').trim();
+  
+  let color = primaryColor;
+  if (normalized > 0.3) {
+    color = secondaryColor;
+  }
+  if (normalized > 0.6) {
+    color = dangerColor;
+  }
+  
   const time = Date.now() * 0.005;
   const totalAmp = 2 + (height / 2.5) * normalized;
 
   canvasCtx.clearRect(0, 0, width, height);
   canvasCtx.lineWidth = 2;
-  canvasCtx.strokeStyle = getComputedStyle(document.body).getPropertyValue('--accent-primary').trim();
+  canvasCtx.strokeStyle = color; // Use the dynamic color
   canvasCtx.beginPath();
   canvasCtx.moveTo(0, height / 2);
 
