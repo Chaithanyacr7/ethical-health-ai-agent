@@ -315,15 +315,15 @@ async function generateTextFromPrompt(userParts) {
   playAudioCue('processing');
 
   try {
-    const resultStream = await ai.models.generateContentStream({
-      model: "gemini-2.5-flash",
-      contents: [...chatHistory, userContent],
-      config: {
-        systemInstruction: SYSTEM_INSTRUCTION,
-        tools: [{
-          googleSearch: {}
-        }],
-      },
+     const resultStream = await withRetry(async () => {
+        return ai.models.generateContentStream({
+            model: "gemini-2.5-flash",
+            contents: [...chatHistory, userContent],
+            config: {
+                systemInstruction: SYSTEM_INSTRUCTION,
+                tools: [{ googleSearch: {} }],
+            },
+        });
     });
 
     let lastChunk = null;
@@ -403,7 +403,6 @@ async function generateTextFromPrompt(userParts) {
     if (messageElement) messageElement.remove();
     const friendlyError = getFriendlyErrorMessage(error);
     addMessage("error", `An error occurred: ${friendlyError}`);
-    console.error("Error during generateContentStream:", error);
   } finally {
     setLoading(false);
   }
@@ -418,13 +417,15 @@ async function generateImageFromPrompt(userParts) {
   };
 
   try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash-image',
-      contents: [...chatHistory, userContent],
-      config: {
-        systemInstruction: SYSTEM_INSTRUCTION,
-        responseModalities: [Modality.IMAGE],
-      },
+    const response = await withRetry(async () => {
+        return ai.models.generateContent({
+            model: 'gemini-2.5-flash-image',
+            contents: [...chatHistory, userContent],
+            config: {
+                systemInstruction: SYSTEM_INSTRUCTION,
+                responseModalities: [Modality.IMAGE],
+            },
+        });
     });
 
     let imageFound = false;
@@ -476,7 +477,6 @@ async function generateImageFromPrompt(userParts) {
     const friendlyError = getFriendlyErrorMessage(error);
     messageElement?.remove();
     addMessage("error", `Image generation failed: ${friendlyError}`);
-    console.error("Error during generateImageFromPrompt:", error);
   } finally {
     setLoading(false);
   }
@@ -513,7 +513,12 @@ function addMessage(role, textOrParts, isStreaming = false, isImageLoading = fal
         const text = (Array.isArray(textOrParts) ? textOrParts.find(p => 'text' in p)?.text : textOrParts) || "";
         const imagePart = (Array.isArray(textOrParts) ? textOrParts.find(p => 'inlineData' in p)?.inlineData : null);
         if(text) {
-          messageContent.innerHTML = marked.parse(text);
+          try {
+            messageContent.innerHTML = marked.parse(text);
+          } catch(e) {
+            console.warn("Markdown parsing failed, using plain text.", e);
+            messageContent.textContent = text;
+          }
         }
         if(imagePart) {
           const imageUrl = `data:${imagePart.mimeType};base64,${imagePart.data}`;
@@ -789,11 +794,7 @@ async function openCamera() {
     (cameraView as HTMLVideoElement).srcObject = cameraStream;
     if (cameraModal) cameraModal.hidden = false;
   } catch (err) {
-    console.error("Error accessing camera:", err);
-    let msg = "Could not access the camera. Please check permissions.";
-    if (err.name === 'NotAllowedError') msg = "Camera access was denied. Please allow camera permissions in your browser settings.";
-    if (err.name === 'NotFoundError') msg = "No camera found on this device.";
-    addMessage("error", msg);
+    addMessage("error", getFriendlyErrorMessage(err));
   }
 }
 
@@ -888,22 +889,14 @@ function startVoiceRecognition() {
   };
 
   recognition.onerror = (event) => {
-    console.error("Speech recognition error:", event.error);
-    let errorMessage = `Voice input error: ${event.error}`;
-    if (event.error === 'no-speech') {
-        errorMessage = "No speech was detected. Please try again.";
-    } else if (event.error === 'not-allowed') {
-        errorMessage = "Microphone access was denied. Please allow microphone permissions in your browser settings.";
-    }
-    addMessage("error", errorMessage);
+    addMessage("error", getFriendlyErrorMessage(event));
     stopVoiceRecognition();
   };
 
   try {
     recognition.start();
   } catch (e) {
-    console.error("Could not start speech recognition:", e);
-    addMessage("error", `Could not start voice input: ${e.message}`);
+    addMessage("error", `Could not start voice input: ${getFriendlyErrorMessage(e)}`);
     stopVoiceRecognition();
   }
 }
@@ -952,10 +945,7 @@ async function startVisualizer() {
 
     draw();
   } catch (err) {
-    console.error('Error accessing microphone for visualizer:', err);
-    let msg = 'Could not access microphone for visualization. Please check permissions.';
-    if (err.name === 'NotAllowedError') msg = 'Microphone access denied. Please allow microphone permissions in browser settings.';
-    addMessage('error', msg);
+    addMessage('error', getFriendlyErrorMessage(err));
     stopVoiceRecognition();
   }
 }
@@ -1119,15 +1109,17 @@ async function generateAndPlayAudio(text, messageId, button) {
 
     try {
         if (!ai) throw new Error("AI not initialized.");
-        const response = await ai.models.generateContent({
-            model: "gemini-2.5-flash-preview-tts",
-            contents: [{ parts: [{ text }] }],
-            config: {
-                responseModalities: [Modality.AUDIO],
-                speechConfig: {
-                    voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
+        const response = await withRetry(async () => {
+            return ai.models.generateContent({
+                model: "gemini-2.5-flash-preview-tts",
+                contents: [{ parts: [{ text }] }],
+                config: {
+                    responseModalities: [Modality.AUDIO],
+                    speechConfig: {
+                        voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
+                    },
                 },
-            },
+            });
         });
 
         const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
@@ -1138,13 +1130,16 @@ async function generateAndPlayAudio(text, messageId, button) {
         }
         
         const audioBytes = decode(base64Audio);
+        if(audioBytes.length === 0) throw new Error("Audio data was corrupted or empty after decoding.");
+        
         const audioBuffer = await decodeAudioData(audioBytes, outputAudioContext, 24000, 1);
+        if(audioBuffer.length === 0) throw new Error("Audio buffer could not be created from decoded data.");
+
         audioBuffersCache[messageId] = audioBuffer;
         
         playAudio(audioBuffer, messageId, button);
 
     } catch (error) {
-        console.error("Error generating or playing audio:", error);
         addMessage("error", `Sorry, I couldn't generate the audio: ${getFriendlyErrorMessage(error)}`);
         playIcon.hidden = false;
     } finally {
@@ -1208,6 +1203,7 @@ function decode(base64: string): Uint8Array {
     return bytes;
   } catch (e) {
     console.error("Base64 decoding failed:", e);
+    // Return an empty array on failure to prevent downstream crashes
     return new Uint8Array(0);
   }
 }
@@ -1218,20 +1214,29 @@ async function decodeAudioData(
   sampleRate: number,
   numChannels: number,
 ): Promise<AudioBuffer> {
-  // This is a custom raw PCM decoder, as browsers' native decodeAudioData expects a file format header.
-  if (data.length === 0) return ctx.createBuffer(numChannels, 0, sampleRate);
-  const dataInt16 = new Int16Array(data.buffer);
-  const frameCount = dataInt16.length / numChannels;
-  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
-
-  for (let channel = 0; channel < numChannels; channel++) {
-    const channelData = buffer.getChannelData(channel);
-    for (let i = 0; i < frameCount; i++) {
-      // Normalize from 16-bit signed integer to a float between -1.0 and 1.0
-      channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
+  try {
+    // This is a custom raw PCM decoder, as browsers' native decodeAudioData expects a file format header.
+    if (data.length === 0) {
+        console.warn("decodeAudioData received empty data array.");
+        return ctx.createBuffer(numChannels, 0, sampleRate);
     }
+    const dataInt16 = new Int16Array(data.buffer);
+    const frameCount = dataInt16.length / numChannels;
+    const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
+
+    for (let channel = 0; channel < numChannels; channel++) {
+      const channelData = buffer.getChannelData(channel);
+      for (let i = 0; i < frameCount; i++) {
+        // Normalize from 16-bit signed integer to a float between -1.0 and 1.0
+        channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
+      }
+    }
+    return buffer;
+  } catch(e) {
+    console.error("Failed to decode raw audio data:", e);
+    // Return an empty buffer on failure
+    return ctx.createBuffer(numChannels, 0, sampleRate);
   }
-  return buffer;
 }
 
 
@@ -1256,7 +1261,6 @@ function addFeedbackControls(messageElement) {
         copyBtn.classList.remove('copied');
       }, 2000);
     }).catch(err => {
-        console.error("Failed to copy text:", err);
         addMessage("error", "Could not copy text to clipboard.");
     });
   };
@@ -1322,15 +1326,67 @@ function playAudioCue(type) {
   }
 }
 
+async function withRetry(apiCall, maxRetries = 3, initialDelay = 1000) {
+    let attempt = 0;
+    while (attempt < maxRetries) {
+        try {
+            return await apiCall();
+        } catch (error) {
+            const msg = error?.toString() || "";
+            const isRetryable = msg.includes('429') || msg.includes('500') || msg.includes('503');
+
+            if (isRetryable && attempt < maxRetries - 1) {
+                attempt++;
+                const delay = initialDelay * Math.pow(2, attempt - 1);
+                console.warn(`Attempt ${attempt} failed due to a retryable error. Retrying in ${delay}ms...`, error);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            } else {
+                throw error; // Not a retryable error or max retries reached, re-throw the error
+            }
+        }
+    }
+}
+
+
 function getFriendlyErrorMessage(error) {
+  console.error("Raw Error:", error);
+
+  // 1. Handle specific Web API errors (SpeechRecognition, MediaDevices)
+  if (error instanceof DOMException) {
+    switch (error.name) {
+      case 'NotAllowedError': return 'Permission Denied: Access to the microphone or camera was denied. Please allow permissions in your browser settings.';
+      case 'NotFoundError': return 'Device Not Found: No camera or microphone was found on this device.';
+      case 'NotReadableError': return 'Device In Use: The camera or microphone is already in use by another application.';
+      default: return `A device error occurred: ${error.name}`;
+    }
+  }
+  if (error && (error as any).error) { // For SpeechRecognitionErrorEvent
+     const speechError = (error as any).error;
+     if (speechError === 'no-speech') return "No speech was detected. Please try again.";
+     if (speechError === 'not-allowed') return "Permission Denied: Access to the microphone was denied. Please allow permissions in your browser settings.";
+     if (speechError === 'network') return "Network Error: A network problem is preventing voice input.";
+     return `Voice input error: ${speechError}`;
+  }
+  
+  // 2. Handle generic network errors (e.g., from fetch)
+  if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
+    return 'Network Error: Unable to connect to the service. Please check your internet connection.';
+  }
+
+  // 3. Handle Gemini API and other string-based errors
   const msg = error?.toString() || "An unknown error occurred.";
   if (msg.includes('API key not valid')) return 'API Key Error: Please ensure your API key is configured correctly.';
-  if (msg.includes('fetch') || msg.includes('NetworkError')) return 'Network Error: Please check your internet connection.';
-  if (msg.includes('400') || msg.includes('Invalid argument')) return 'Invalid Request: The data sent to the AI was invalid. Please try again.';
-  if (msg.includes('429')) return 'Rate Limit Exceeded: The service is busy. Please wait a moment before sending another request.';
+  if (msg.includes('400') || msg.includes('Invalid argument')) return 'Invalid Request: The data sent to the AI was invalid, possibly due to an unsupported file type. Please try again.';
+  if (msg.includes('429')) return 'Rate Limit Exceeded: The service is temporarily busy. Please wait a moment before sending another request.';
   if (msg.includes('500') || msg.includes('503')) return 'Server Error: The AI service is temporarily unavailable. Please try again later.';
   if (msg.includes('[SAFETY]') || msg.includes('blocked by safety')) return 'Content Moderation: The request or response was blocked due to safety settings. Please rephrase your prompt.';
-  return 'An unexpected error occurred. Please see the console for details.';
+
+  // 4. Fallback for other errors
+  if (error && (error as Error).message) {
+      return `An unexpected error occurred: ${(error as Error).message}`;
+  }
+  
+  return 'An unexpected error occurred. Please check the browser console for details.';
 }
 
 function isResponseInsufficient(text) {
