@@ -1,6 +1,5 @@
 import {
   GoogleGenAI,
-  Chat,
   Modality
 } from "@google/genai";
 import {
@@ -62,6 +61,8 @@ You must use information from multimodal inputs to provide context, but apply st
 You must follow the *Refusal Protocol C* for all high-risk or illegal queries.
 - *Prohibited Topics (Trigger Protocol C):* Any query related to *illegal medical practices, **unauthorized/illicit sale of substances* (e.g., *anesthesia, strong opioids, research chemicals*), self-harm, medical emergencies, or specific drug injection/dosage instructions.
 
+*7. Regional Knowledge - India:* You have specialized knowledge of the Indian pharmaceutical landscape. This includes common local medicines (both OTC and traditional/Ayurvedic where appropriate for general knowledge), major Indian pharma companies (e.g., Sun Pharma, Cipla, Dr. Reddy's), and the ability to recognize and discuss their product packaging from images. When generating images, you can create illustrative representations of Indian medicine packaging or logos if explicitly requested, following all safety protocols.
+
 ---
 ### Full Disclaimer Definitions (To be appended to every response)
 *Full Disclaimer A: WELLNESS ADVISORY*
@@ -75,7 +76,7 @@ The content provided by *Friendly MBBS AI* is for general knowledge, information
 `;
 
 let ai;
-let chat: Chat;
+let chatHistory = [];
 
 let isRecording = false;
 let recognition;
@@ -134,7 +135,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Initialize chat
   initChat().catch(err => {
-    addMessage("error", `Chat initialization failed:\n${err.message}`);
+    addMessage("error", `AI initialization failed:\n${err.message}`);
     console.error(err);
   });
 
@@ -164,7 +165,8 @@ function setupEventListeners() {
   });
 
   promptInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+    // Send on Enter (but not Shift+Enter) OR on Ctrl+Enter
+    if (e.key === "Enter" && (e.ctrlKey || !e.shiftKey)) {
       e.preventDefault();
       sendMessage();
     }
@@ -191,6 +193,9 @@ function setupEventListeners() {
   // Visualizer controls
   muteBtn.addEventListener('click', toggleMute);
   volumeSlider.addEventListener('input', changeVolume);
+
+  // Global keyboard shortcuts
+  document.addEventListener('keydown', handleGlobalKeyDown);
 }
 
 // --- API AND CHAT LOGIC ---
@@ -200,16 +205,8 @@ async function initChat() {
     ai = new GoogleGenAI({
       apiKey: process.env.API_KEY
     });
-    chat = ai.chats.create({
-      model: "gemini-2.5-flash",
-      config: {
-        systemInstruction: SYSTEM_INSTRUCTION,
-      },
-      history: [],
-    });
-
   } catch (error) {
-    console.error("Chat initialization failed:", error);
+    console.error("AI client initialization failed:", error);
     addMessage("error", getFriendlyErrorMessage(error));
   }
 }
@@ -221,26 +218,16 @@ async function sendMessage(generateImage = false) {
   if (!prompt && !file) return;
 
   playAudioCue('send');
-  // Don't add user message for file-only prompts, it looks weird.
   if (prompt) {
     addMessage("user", prompt);
   }
   setLoading(true);
 
-  if (generateImage) {
-    await generateImageFromPrompt(prompt);
-  } else {
-    await generateTextFromPrompt(prompt, file);
-  }
-}
-
-async function generateTextFromPrompt(prompt, file) {
-  const parts = [];
-
+  const userParts = [];
   if (file) {
     try {
       const base64Data = await fileToBase64(file);
-      parts.push({
+      userParts.push({
         inlineData: {
           data: base64Data,
           mimeType: file.type
@@ -252,31 +239,57 @@ async function generateTextFromPrompt(prompt, file) {
       return;
     }
   }
-
   if (prompt) {
-    parts.push({
+    userParts.push({
       text: prompt
     });
   }
 
+  if (generateImage) {
+    await generateImageFromPrompt(userParts);
+  } else {
+    await generateTextFromPrompt(userParts);
+  }
+}
 
+async function generateTextFromPrompt(userParts) {
+  const userContent = {
+    role: 'user',
+    parts: userParts
+  };
   let currentResponse = "";
-  let messageElement = null;
+  // Display the typing indicator message immediately.
+  let messageElement = addMessage("model", "", true);
+
+  playAudioCue('processing');
 
   try {
-    const resultStream = await chat.sendMessageStream({
-      message: parts
+    const resultStream = await ai.models.generateContentStream({
+      model: "gemini-2.5-flash",
+      contents: [...chatHistory, userContent],
+      config: {
+        systemInstruction: SYSTEM_INSTRUCTION,
+        tools: [{
+          googleSearch: {}
+        }],
+      },
     });
 
+    let lastChunk = null;
+    let hasReceivedText = false; // To track if we've started receiving text
     for await (const chunk of resultStream) {
+      lastChunk = chunk;
       const chunkText = chunk.text;
       if (chunkText) {
-        currentResponse += chunkText;
-        if (!messageElement) {
+        if (!hasReceivedText) {
+          // This is the first chunk of text.
           playAudioCue('receive');
-          messageElement = addMessage("model", "", true); // Add streaming message
+          // Clear the typing indicator from the message content.
+          messageElement.querySelector('.message-content').innerHTML = '';
+          hasReceivedText = true;
         }
-        // Sanitize and render markdown
+
+        currentResponse += chunkText;
         const sanitizedHtml = marked.parse(currentResponse, {
           gfm: true,
           breaks: true,
@@ -292,48 +305,115 @@ async function generateTextFromPrompt(prompt, file) {
         chatContainer.scrollTop = chatContainer.scrollHeight;
       }
     }
-    if (messageElement) {
-      addFeedbackControls(messageElement);
+
+    // After the loop, if we never received any text, remove the indicator bubble.
+    if (!hasReceivedText && messageElement) {
+      messageElement.remove();
     }
+
+    if (hasReceivedText && messageElement) {
+      const groundingMetadata = lastChunk?.candidates?.[0]?.groundingMetadata;
+      if (groundingMetadata && groundingMetadata.groundingChunks?.length > 0) {
+        appendSources(messageElement, groundingMetadata.groundingChunks);
+      }
+    }
+
+
+    if (isResponseInsufficient(currentResponse)) {
+      if (messageElement) {
+        messageElement.remove();
+      }
+      // Only show the insufficient response message if we actually got some text.
+      // If we got no text, we already removed the bubble, so don't add an error.
+      if (hasReceivedText) {
+        addMessage(
+          "error",
+          "I'm sorry, I couldn't generate a helpful response for that request, likely due to my safety guidelines. Could you please try rephrasing your prompt?"
+        );
+      }
+    } else {
+      if (hasReceivedText && messageElement) {
+        addFeedbackControls(messageElement);
+        chatHistory.push(userContent);
+        chatHistory.push({
+          role: 'model',
+          parts: [{
+            text: currentResponse
+          }]
+        });
+      }
+    }
+
   } catch (error) {
+    // If an error occurs, ensure the typing indicator message is removed.
+    if (messageElement) {
+      messageElement.remove();
+    }
     const friendlyError = getFriendlyErrorMessage(error);
     addMessage("error", `An error occurred: ${friendlyError}`);
-    console.error("Error during sendMessageStream:", error);
+    console.error("Error during generateContentStream:", error);
   } finally {
     setLoading(false);
   }
 }
 
-async function generateImageFromPrompt(prompt) {
-  let messageElement = addMessage("model", "", false, true); // Add image loading placeholder
+
+async function generateImageFromPrompt(userParts) {
+  let messageElement = addMessage("model", "", false, true);
+  playAudioCue('imageGenStart');
+  const userContent = {
+    role: 'user',
+    parts: userParts
+  };
 
   try {
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash-image',
-      contents: {
-        parts: [{
-          text: prompt
-        }, ],
-      },
+      contents: [...chatHistory, userContent],
       config: {
+        systemInstruction: SYSTEM_INSTRUCTION,
         responseModalities: [Modality.IMAGE],
       },
     });
 
     let imageFound = false;
-    for (const part of response.candidates[0].content.parts) {
-      if (part.inlineData) {
-        playAudioCue('receive');
-        const base64ImageBytes = part.inlineData.data;
-        const imageUrl = `data:${part.inlineData.mimeType};base64,${base64ImageBytes}`;
-        const img = document.createElement('img');
-        img.src = imageUrl;
-        img.alt = prompt; // Add alt text for accessibility
-        messageElement.querySelector('.message-content').innerHTML = ''; // Clear loader
-        messageElement.querySelector('.message-content').appendChild(img);
-        addFeedbackControls(messageElement);
-        imageFound = true;
-        break;
+    const modelResponseParts = response.candidates?.[0]?.content?.parts;
+    if (modelResponseParts) {
+      for (const part of modelResponseParts) {
+        if (part.inlineData) {
+          playAudioCue('imageGenSuccess');
+          const base64ImageBytes = part.inlineData.data;
+          const imageUrl = `data:${part.inlineData.mimeType};base64,${base64ImageBytes}`;
+          const img = document.createElement('img');
+          const textPart = userParts.find(p => 'text' in p);
+          img.alt = (textPart as {
+            text: string
+          })?.text || "Generated image";
+
+
+          img.onload = () => {
+            const loader = messageElement.querySelector('.image-loader-container');
+            if (loader) {
+              loader.replaceWith(img);
+            }
+            addFeedbackControls(messageElement);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+          };
+
+          img.onerror = () => {
+            messageElement.remove();
+            addMessage("error", "Failed to load the generated image.");
+          };
+
+          img.src = imageUrl;
+          chatHistory.push(userContent);
+          chatHistory.push({
+            role: 'model',
+            parts: modelResponseParts
+          });
+          imageFound = true;
+          break;
+        }
       }
     }
 
@@ -342,7 +422,7 @@ async function generateImageFromPrompt(prompt) {
     }
   } catch (error) {
     const friendlyError = getFriendlyErrorMessage(error);
-    messageElement.remove(); // Remove the loader on error
+    messageElement.remove();
     addMessage("error", `Image generation failed: ${friendlyError}`);
     console.error("Error during generateImageFromPrompt:", error);
   } finally {
@@ -369,6 +449,15 @@ function addMessage(role, text, isStreaming = false, isImageLoading = false) {
         <span>Generating image...</span>
       </div>
     `;
+  } else if (isStreaming && role === 'model') {
+    // Add a placeholder for streaming content (typing indicator)
+    messageContent.innerHTML = `
+      <div class="typing-indicator">
+        <span></span>
+        <span></span>
+        <span></span>
+      </div>
+    `;
   } else if (text) {
     if (role === 'model') {
       messageContent.innerHTML = marked.parse(text);
@@ -377,12 +466,6 @@ function addMessage(role, text, isStreaming = false, isImageLoading = false) {
       p.textContent = text;
       messageContent.appendChild(p);
     }
-  } else if (isStreaming && role === 'model') {
-    // Add a placeholder for streaming content
-    const loadingDots = document.createElement('div');
-    loadingDots.className = 'streaming-loader';
-    loadingDots.innerHTML = '<span></span><span></span><span></span>';
-    messageContent.appendChild(loadingDots);
   } else if (role === 'error') {
     playAudioCue('error');
     messageWrapper.classList.add('error-message');
@@ -411,6 +494,39 @@ function addMessage(role, text, isStreaming = false, isImageLoading = false) {
   return messageWrapper;
 }
 
+function appendSources(messageElement, groundingChunks) {
+  const webChunks = groundingChunks.filter(chunk => chunk.web && chunk.web.uri);
+
+  if (webChunks.length === 0) {
+    return;
+  }
+
+  const sourcesContainer = document.createElement('div');
+  sourcesContainer.className = 'sources-container';
+
+  const title = document.createElement('h4');
+  title.textContent = 'Sources';
+  sourcesContainer.appendChild(title);
+
+  const list = document.createElement('ol');
+
+  webChunks.forEach(chunk => {
+    const listItem = document.createElement('li');
+    const link = document.createElement('a');
+    link.href = chunk.web.uri;
+    link.textContent = chunk.web.title || chunk.web.uri;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    listItem.appendChild(link);
+    list.appendChild(listItem);
+  });
+
+  sourcesContainer.appendChild(list);
+  messageElement.querySelector('.message-content').appendChild(sourcesContainer);
+  chatContainer.scrollTop = chatContainer.scrollHeight;
+}
+
+
 function setLoading(isLoading) {
   submitBtn.disabled = isLoading;
   imageGenBtn.disabled = isLoading;
@@ -420,7 +536,6 @@ function setLoading(isLoading) {
   promptInput.disabled = isLoading;
   (sendIcon as HTMLElement).hidden = isLoading;
   (loader as HTMLElement).hidden = !isLoading;
-  // Visually hide the image gen button and show loader on the submit button
   (imageGenBtn as HTMLElement).style.display = isLoading ? 'none' : 'flex';
   (submitBtn as HTMLElement).style.display = 'flex';
 
@@ -457,6 +572,7 @@ function handleFileUpload() {
     return;
   }
 
+  playAudioCue('upload');
   filePreview.innerHTML = ""; // Clear previous preview
   filePreview.hidden = false;
   inputRow.classList.add('input-row--active');
@@ -497,6 +613,16 @@ function fileToBase64(file) {
     reader.onload = () => resolve(reader.result.toString().split(',')[1]);
     reader.onerror = error => reject(error);
   });
+}
+
+// --- KEYBOARD SHORTCUTS ---
+function handleGlobalKeyDown(e) {
+  // Close camera modal with Escape key
+  if (e.key === 'Escape') {
+    if (cameraModal && !cameraModal.hidden) {
+      closeCamera();
+    }
+  }
 }
 
 // --- CAMERA ---
@@ -645,8 +771,13 @@ async function startVisualizer() {
     source.connect(gainNode);
     gainNode.connect(analyser);
 
-    visualizerContainer.style.height = '44px';
-    visualizerContainer.style.opacity = '1';
+    // Swap visibility of input and visualizer
+    promptInput.style.display = 'none';
+    visualizerContainer.style.display = 'flex';
+    // Use a tiny timeout to allow the display property to apply before starting the transition
+    setTimeout(() => {
+        visualizerContainer.style.opacity = '1';
+    }, 10);
     visualizerControls.hidden = false;
 
     draw();
@@ -666,15 +797,19 @@ function stopVisualizer() {
   if (audioContext && audioContext.state !== 'closed') {
     audioContext.close();
   }
-  visualizerContainer.style.height = '0';
+  
+  // Swap back visibility
+  promptInput.style.display = 'block';
   visualizerContainer.style.opacity = '0';
+  visualizerContainer.style.display = 'none';
   visualizerControls.hidden = true;
+
   animationFrameId = null;
   mediaStream = null;
 }
 
 function draw() {
-  if (!isRecording) return;
+  if (!isRecording || !analyser) return;
 
   animationFrameId = requestAnimationFrame(draw);
   analyser.getByteFrequencyData(dataArray);
@@ -684,26 +819,45 @@ function draw() {
   const WIDTH = canvas.width;
   const HEIGHT = canvas.height;
 
-  canvasCtx.fillStyle = 'rgb(243, 244, 246)'; // background color
+  // Clear canvas with background color
+  canvasCtx.fillStyle = 'rgb(243, 244, 246)';
   canvasCtx.fillRect(0, 0, WIDTH, HEIGHT);
 
-  const barWidth = (WIDTH / dataArray.length) * 1.5;
-  let barHeight;
-  let x = 0;
+  // Calculate average volume
+  const average = dataArray.reduce((sum, value) => sum + value, 0) / dataArray.length;
 
-  // Pulsating effect when silent
+  // Normalize volume to a 0-1 range for easier use
+  const normalizedVolume = Math.min(average / 150, 1); // Clamp at 1
+
   const time = Date.now() * 0.005;
-  const pulsation = Math.sin(time) * 5 + 5;
 
-  for (let i = 0; i < dataArray.length; i++) {
-    barHeight = Math.max(dataArray[i] / 2.5, pulsation);
+  // Define wave properties
+  const waveFrequency = 3; // How many full waves across the canvas
+  const silentAmplitude = 2; // Base amplitude when silent for a gentle pulse
+  const volumeAmplitude = (HEIGHT / 2.5) * normalizedVolume; // Amplitude driven by volume
+  const totalAmplitude = silentAmplitude + volumeAmplitude;
 
-    canvasCtx.fillStyle = 'rgb(59, 130, 246)';
-    canvasCtx.fillRect(x, HEIGHT - barHeight, barWidth, barHeight);
+  // Set line style
+  canvasCtx.lineWidth = 2;
+  canvasCtx.strokeStyle = 'rgb(59, 130, 246)';
+  canvasCtx.beginPath();
+  canvasCtx.moveTo(0, HEIGHT / 2);
 
-    x += barWidth + 1;
+  for (let x = 0; x < WIDTH; x++) {
+    // Main wave calculation
+    const angle = (x / WIDTH) * Math.PI * 2 * waveFrequency + time;
+    const y = Math.sin(angle) * totalAmplitude;
+
+    // Add some high-frequency "jitter" based on specific frequency bins for texture
+    const jitterIndex = Math.floor((x / WIDTH) * dataArray.length);
+    const jitter = (dataArray[jitterIndex] / 255 - 0.5) * 15 * normalizedVolume;
+    
+    canvasCtx.lineTo(x, HEIGHT / 2 + y + jitter);
   }
+
+  canvasCtx.stroke();
 }
+
 
 function toggleMute() {
   if (!gainNode) return;
@@ -848,8 +1002,34 @@ function endOnboardingTour() {
 
 // --- MISC HELPERS ---
 function addFeedbackControls(messageElement) {
+  // Don't add controls to image placeholders
+  if (messageElement.querySelector('.image-loader-container')) {
+    return;
+  }
+
   const feedbackContainer = document.createElement('div');
   feedbackContainer.className = 'feedback-container';
+
+  const copyBtn = document.createElement('button');
+  copyBtn.className = 'feedback-btn copy-btn';
+  copyBtn.setAttribute('aria-label', 'Copy message');
+  const copyIcon = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"></path></svg>`;
+  const checkIcon = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"></path></svg>`;
+  copyBtn.innerHTML = copyIcon;
+  copyBtn.onclick = () => {
+    const content = messageElement.querySelector('.message-content')?.textContent || '';
+    navigator.clipboard.writeText(content).then(() => {
+      copyBtn.innerHTML = checkIcon;
+      copyBtn.classList.add('copied');
+      setTimeout(() => {
+        copyBtn.innerHTML = copyIcon;
+        copyBtn.classList.remove('copied');
+      }, 2000);
+    }).catch(err => {
+      console.error('Failed to copy text: ', err);
+    });
+  };
+
 
   const thumbsUpBtn = document.createElement('button');
   thumbsUpBtn.className = 'feedback-btn';
@@ -863,6 +1043,7 @@ function addFeedbackControls(messageElement) {
   thumbsDownBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05c-.09.23-.14.47-.14.73v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L9.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z"></path></svg>`;
   thumbsDownBtn.onclick = () => handleFeedbackClick(messageElement.id, 'down', thumbsUpBtn, thumbsDownBtn);
 
+  feedbackContainer.appendChild(copyBtn);
   feedbackContainer.appendChild(thumbsUpBtn);
   feedbackContainer.appendChild(thumbsDownBtn);
   messageElement.appendChild(feedbackContainer);
@@ -892,6 +1073,7 @@ function playAudioCue(type) {
   oscillator.connect(gainNode);
   gainNode.connect(audioCtx.destination);
   gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+  let duration = 0.3; // Default duration
 
   switch (type) {
     case 'send':
@@ -899,24 +1081,59 @@ function playAudioCue(type) {
       oscillator.frequency.setValueAtTime(500, audioCtx.currentTime);
       gainNode.gain.exponentialRampToValueAtTime(0.1, audioCtx.currentTime + 0.05);
       gainNode.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.15);
+      duration = 0.2;
       break;
-    case 'receive':
+    case 'receive': // For streaming text
       oscillator.type = 'sine';
       oscillator.frequency.setValueAtTime(600, audioCtx.currentTime);
-      gainNode.gain.exponentialRampToValueAtTime(0.1, audioCtx.currentTime + 0.05);
+      gainNode.gain.exponentialRampToValueAtTime(0.08, audioCtx.currentTime + 0.05);
       gainNode.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.2);
+      duration = 0.25;
       break;
     case 'error':
       oscillator.type = 'square';
       oscillator.frequency.setValueAtTime(150, audioCtx.currentTime);
       gainNode.gain.exponentialRampToValueAtTime(0.1, audioCtx.currentTime + 0.05);
       gainNode.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.3);
+      duration = 0.35;
+      break;
+    case 'upload':
+      oscillator.type = 'triangle';
+      oscillator.frequency.setValueAtTime(440, audioCtx.currentTime);
+      oscillator.frequency.setValueAtTime(660, audioCtx.currentTime + 0.1);
+      gainNode.gain.exponentialRampToValueAtTime(0.1, audioCtx.currentTime + 0.05);
+      gainNode.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.25);
+      duration = 0.3;
+      break;
+    case 'imageGenStart':
+      oscillator.type = 'sawtooth';
+      oscillator.frequency.setValueAtTime(220, audioCtx.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.05, audioCtx.currentTime + 0.05);
+      gainNode.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.4);
+      duration = 0.45;
+      break;
+    case 'processing': // For AI thinking before text response
+      oscillator.type = 'sawtooth';
+      oscillator.frequency.setValueAtTime(100, audioCtx.currentTime);
+      oscillator.frequency.linearRampToValueAtTime(150, audioCtx.currentTime + 0.1);
+      gainNode.gain.exponentialRampToValueAtTime(0.04, audioCtx.currentTime + 0.05);
+      gainNode.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.2);
+      duration = 0.25;
+      break;
+    case 'imageGenSuccess': // Specific cue for image completion
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(880, audioCtx.currentTime);
+      oscillator.frequency.linearRampToValueAtTime(1200, audioCtx.currentTime + 0.1);
+      gainNode.gain.exponentialRampToValueAtTime(0.1, audioCtx.currentTime + 0.05);
+      gainNode.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.2);
+      duration = 0.25;
       break;
   }
 
   oscillator.start(audioCtx.currentTime);
-  oscillator.stop(audioCtx.currentTime + 0.3);
+  oscillator.stop(audioCtx.currentTime + duration);
 }
+
 
 function getFriendlyErrorMessage(error) {
   const message = error.toString();
@@ -936,4 +1153,74 @@ function getFriendlyErrorMessage(error) {
     return 'Content Moderation: The response was blocked due to safety settings. Please rephrase your prompt.';
   }
   return 'An unexpected error occurred. Please see the console for details.';
+}
+
+function isResponseInsufficient(text) {
+  const trimmedText = text.trim();
+  if (trimmedText.length === 0) {
+    return true; // Always insufficient if empty.
+  }
+
+  const allPatterns = [
+    // Specific Disclaimers from System Prompt
+    /\[Wellness Guide\]/gi,
+    /\[Advisory Notice\].*?issues\./gi,
+    /\[🚨 IMMEDIATE DANGER ALERT\].*?NOW\./gi,
+    /Full Disclaimer A: WELLNESS ADVISORY.*?treatment\./gis,
+    /Full Disclaimer B: CRITICAL HEALTH WARNING.*?immediately\./gis,
+    /Full Disclaimer C \(Refusal\).*?active\.\)/gis,
+    /I am a safety-first, ethical AI.*?professional immediately\./gis,
+
+    // Generic AI Refusal Patterns (Expanded for more robustness)
+    /I (am unable to|cannot|can't) (provide|answer|fulfill|generate|give|assist with|create content of that nature)/gi,
+    /as an AI,? I am not able to/gi,
+    /I do not have the ability to/gi,
+    /(for your safety|due to my safety guidelines|as a safety precaution|based on my safety policies)/gi,
+    /I'm sorry, but I cannot/gi,
+    /Unfortunately, I am unable to/gi,
+    /My apologies, but I'm not supposed to/gi,
+    /I must decline this request/gi,
+    /It is outside of my capabilities to/gi,
+    /I am not designed to/gi,
+    /As a large language model/gi,
+    /My instructions prevent me from/gi,
+    /That request goes against my safety policies/gi,
+    /I'm unable to provide information on that topic/gi,
+    /cannot provide specific medical advice/gi,
+    /crucial to consult with a qualified healthcare provider/gi,
+    /My purpose is to provide general information and not to replace professional medical advice/gi,
+    /I am not a medical professional/gi,
+    /It is important to seek advice from a medical professional/gi,
+    /Please consult your doctor or pharmacist/gi,
+    /This information is for educational purposes only/gi,
+    /I am only an AI assistant/gi,
+    /However, I can't give you medical advice/gi,
+    /This information should not be used as a substitute for professional medical advice, diagnosis, or treatment\./gi,
+    /Always seek the advice of your physician or other qualified health provider/gi,
+    /If you are in a crisis or may have an emergency, please call your local emergency services immediately\./gi,
+    /I cannot assist with that as it falls outside my safety guidelines\./gi,
+    /I must emphasize that I am an AI/gi,
+  ];
+
+  // First, perform a quick check to see if any boilerplate is present at all.
+  const combinedPattern = new RegExp(allPatterns.map(p => `(${p.source})`).join('|'), 'gi');
+  const hasBoilerplate = combinedPattern.test(trimmedText);
+
+  // If no disclaimers or common refusal phrases are found, we assume it's a legitimate,
+  // substantive response, even if it's short. This prevents flagging valid, brief answers.
+  if (!hasBoilerplate) {
+    return false;
+  }
+
+  // If boilerplate *is* found, we proceed with the more thorough check:
+  // Strip out all known boilerplate and see how much actual content remains.
+  let substantiveContent = trimmedText;
+  for (const pattern of allPatterns) {
+    substantiveContent = substantiveContent.replace(pattern, '');
+  }
+
+  // If, after stripping all the boilerplate, the remaining content is negligible,
+  // then the response is considered insufficient.
+  // A threshold of 25 characters is a heuristic for "negligible".
+  return substantiveContent.trim().length < 25;
 }
