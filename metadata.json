@@ -1,0 +1,8 @@
+{
+  "name": "Friendly MBBS AI (knowledgeful)",
+  "description": "An Ethical, Green, and Highly-Constrained Multi-Modal Health & Wellness Advisor using the Gemini API.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
