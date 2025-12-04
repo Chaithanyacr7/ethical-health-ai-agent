@@ -1,5 +1,13 @@
-
-import { GoogleGenAI, Chat, Modality, LiveServerMessage, Blob as GenAIBlob, Type, FunctionDeclaration, GenerateContentResponse } from "@google/genai";
+import { 
+    GoogleGenAI, 
+    Chat, 
+    Modality, 
+    LiveServerMessage, 
+    Blob as GenAIBlob, 
+    HarmCategory, 
+    HarmBlockThreshold, 
+    GenerateContentResponse 
+} from "@google/genai";
 import { marked } from 'marked';
 import hljs from 'highlight.js';
 
@@ -10,12 +18,63 @@ const LIVE_MODEL = 'gemini-2.5-flash-native-audio-preview-09-2025';
 const INPUT_SAMPLE_RATE = 16000;
 const OUTPUT_SAMPLE_RATE = 24000;
 
+// --- SAFETY FILTERS ---
+// Strict safety filters for a health application
+const SAFETY_SETTINGS = [
+    { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_LOW_AND_ABOVE },
+    { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_LOW_AND_ABOVE },
+    { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_LOW_AND_ABOVE },
+    { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_LOW_AND_ABOVE },
+];
+
+// --- DATA CHUNKING & EMBEDDINGS (SIMULATED) ---
+// In a production app, this would query a Vector DB (e.g., Pinecone, Chroma).
+// Here we simulate the "Chunking" and "Retrieval" phase with local validated knowledge chunks.
+const KNOWLEDGE_CHUNKS = [
+    {
+        id: 'safety_protocol',
+        text: "SAFETY FIRST: Do not provide diagnosis. If user asks for diagnosis, refer to a doctor immediately. Do not interpret lab results definitively."
+    },
+    {
+        id: 'medication_policy',
+        text: "MEDICATION: Do not recommend specific prescription dosages. Explain mechanism of action (how it works) and general side effects only."
+    },
+    {
+        id: 'nutrition_wellness',
+        text: "NUTRITION: Focus on whole foods, balanced diet, and hydration. Avoid extreme diet advice. Emphasize that individual needs vary."
+    },
+    {
+        id: 'emergency',
+        text: "EMERGENCY: If the user mentions chest pain, severe bleeding, or suicidal thoughts, strictly advise calling emergency services (911/999) immediately."
+    }
+];
+
+// Simple "Embedding/Retrieval" simulation using keyword overlap
+function retrieveRelevantContext(query: string): string {
+    const tokens = query.toLowerCase().split(/\s+/);
+    let bestChunk = "";
+    let maxScore = 0;
+
+    KNOWLEDGE_CHUNKS.forEach(chunk => {
+        const chunkTokens = chunk.text.toLowerCase().split(/\s+/);
+        const intersection = tokens.filter(t => chunkTokens.includes(t));
+        const score = intersection.length; // Simple overlap score
+        
+        if (score > 0 && score > maxScore) {
+            maxScore = score;
+            bestChunk = chunk.text;
+        }
+    });
+
+    // If no specific match, return safety protocol as default context
+    return bestChunk || KNOWLEDGE_CHUNKS[0].text;
+}
+
 // --- DOM ELEMENT REFERENCES ---
 const dom = {
     header: {
         newChatBtn: document.getElementById('new-chat-btn') as HTMLButtonElement,
         themeToggleBtn: document.getElementById('theme-toggle-btn') as HTMLButtonElement,
-        // Fix: Cast SVG elements to HTMLElement to allow use of the 'hidden' property.
         sunIcon: document.querySelector('.sun-icon') as HTMLElement,
         moonIcon: document.querySelector('.moon-icon') as HTMLElement,
     },
@@ -23,6 +82,7 @@ const dom = {
         container: document.getElementById('chat-container') as HTMLElement,
         welcomeContainer: document.getElementById('welcome-container') as HTMLElement,
         promptSuggestions: document.getElementById('prompt-suggestions') as HTMLElement,
+        statusIndicator: document.getElementById('status-indicator') as HTMLDivElement, 
     },
     form: {
         form: document.getElementById('chat-form') as HTMLFormElement,
@@ -94,7 +154,6 @@ function initializeApp() {
     }
     
     // Configure Markdown renderer
-    // FIX: Cast options to 'any' to work around potential type mismatches in @types/marked.
     marked.setOptions({
         highlight: (code, lang) => {
             const language = hljs.getLanguage(lang) ? lang : 'plaintext';
@@ -109,12 +168,38 @@ function initializeApp() {
     autoResizeTextarea();
 }
 
+// --- STRUCTURED PROMPTING ---
+// Using XML tags to clearly define role, constraints, and intent.
+const SYSTEM_INSTRUCTION = `
+<ROLE>
+You are Friendly MBBS AI, an ethical, green, and highly-constrained multi-modal health and wellness advisor.
+</ROLE>
+
+<OBJECTIVE>
+Provide helpful, scientific information about health, biology, nutrition, and fitness while strictly avoiding the unauthorized practice of medicine.
+</OBJECTIVE>
+
+<CONSTRAINTS>
+1. DIAGNOSIS: You MUST NOT provide a medical diagnosis for a specific individual.
+2. PRESCRIPTION: You MUST NOT recommend specific prescription medications or dosages for treatment.
+3. EMERGENCY: If a user describes life-threatening symptoms (chest pain, severe bleeding, difficulty breathing), STOP and tell them to call emergency services.
+4. TONE: Be professional, empathetic, and scientifically accurate. Use simple language.
+</CONSTRAINTS>
+
+<FORMAT>
+- Use Markdown for formatting.
+- If providing medical lists, use bullet points.
+- If explaining a complex biological concept, use an analogy.
+</FORMAT>
+`;
+
 function startNewChat() {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     chat = ai.chats.create({
         model: TEXT_MODEL,
         config: {
-            systemInstruction: "You are Friendly MBBS AI, an ethical, green, and highly-constrained multi-modal health and wellness advisor. Your primary goal is safety. You must refuse to answer any questions that could be interpreted as providing a medical diagnosis, treatment plan, or prescription. Instead, you must strongly advise the user to consult a licensed medical professional. For general wellness, fitness, and nutrition questions, you can provide helpful, non-prescriptive information. You are also knowledgeable about medical science and can explain complex topics in simple terms or generate related images.",
+            systemInstruction: SYSTEM_INSTRUCTION,
+            safetySettings: SAFETY_SETTINGS, // Apply Safety Filters
         },
     });
     dom.chat.container.innerHTML = '';
@@ -126,7 +211,6 @@ function startNewChat() {
 // --- THEME MANAGEMENT ---
 function initializeTheme() {
     const savedTheme = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-    // Fix: Cast savedTheme to the expected type to resolve the type error.
     setTheme(savedTheme as 'light' | 'dark');
 }
 
@@ -185,7 +269,6 @@ function attachEventListeners() {
         if (e.target === dom.imageViewer.modal) dom.imageViewer.modal.hidden = true;
     });
 
-    // Handle clicks on generated images
     dom.chat.container.addEventListener('click', (e) => {
         const target = e.target as HTMLElement;
         if (target.tagName === 'IMG' && target.parentElement?.classList.contains('message-content')) {
@@ -195,12 +278,28 @@ function attachEventListeners() {
     });
 }
 
+// --- MEDICAL INTENT VALIDATION ---
+async function checkMedicalIntent(query: string): Promise<boolean> {
+    try {
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+        // Lightweight call to check intent
+        const response = await ai.models.generateContent({
+            model: TEXT_MODEL,
+            contents: `Analyze the following user query. Is it related to health, medicine, biology, wellness, anatomy, or fitness? Answer only "YES" or "NO". Query: "${query}"`,
+        });
+        const answer = response.text?.trim().toUpperCase();
+        return answer?.includes("YES") ?? false;
+    } catch (e) {
+        console.warn("Intent validation failed, defaulting to allow.", e);
+        return true;
+    }
+}
+
 // --- CORE CHAT & GENERATION LOGIC ---
 async function handleSendMessage() {
     const promptText = dom.form.promptInput.value.trim();
     if (isLoading || (!promptText && !attachedFile)) return;
 
-    // Automatically detect image generation requests
     if (promptText.toLowerCase().startsWith('generate an image')) {
         await handleGenerateImage();
         return;
@@ -208,6 +307,22 @@ async function handleSendMessage() {
     
     dom.chat.welcomeContainer.hidden = true;
     setLoading(true);
+
+    // 1. Validate Intent (Medical-Intent Validation)
+    updateStatus("Validating medical intent...");
+    const isMedical = await checkMedicalIntent(promptText);
+    
+    if (!isMedical && !attachedFile) {
+        setLoading(false);
+        updateStatus("");
+        addMessage('user', promptText);
+        dom.form.promptInput.value = '';
+        autoResizeTextarea();
+        const errorMsg = addMessage('model', '', false);
+        errorMsg.classList.add('error-message');
+        errorMsg.textContent = "I am a constrained Health AI. Please ask questions related to health, medicine, or wellness.";
+        return;
+    }
 
     const userMessageParts: any[] = [{ text: promptText }];
     if (attachedFile) {
@@ -225,14 +340,27 @@ async function handleSendMessage() {
     const modelMessageElement = addMessage('model', '', true);
 
     try {
-        const config: any = {};
+        updateStatus("Retrieving knowledge context...");
+        
+        // 2. Data Chunking & Retrieval (Simulated Embeddings)
+        const relevantContext = retrieveRelevantContext(promptText);
+        
+        // 3. Inject Context into specific message (Augmented Retrieval)
+        const augmentedPrompt = [
+            ...userMessageParts,
+            { text: `\n\n<RETRIEVED_CONTEXT>\n${relevantContext}\n</RETRIEVED_CONTEXT>\n` }
+        ];
+
+        const config: any = {
+            safetySettings: SAFETY_SETTINGS // Strict Filters
+        };
         if (isThinkingMode) {
              config.thinkingConfig = { thinkingBudget: 24576 };
         }
 
-        // FIX: `sendMessageStream` expects a `message` property, not `contents`.
+        updateStatus("Generating response...");
         const resultStream = await chat.sendMessageStream({
-            message: userMessageParts,
+            message: augmentedPrompt,
             config
         });
 
@@ -240,17 +368,12 @@ async function handleSendMessage() {
         let lastChunk: GenerateContentResponse | null = null;
         for await (const chunk of resultStream) {
             fullResponse += chunk.text;
-            // FIX: The return type of marked.parse can be a Promise, so we cast it to a string.
             modelMessageElement.innerHTML = marked.parse(fullResponse + '▍') as string;
             lastChunk = chunk;
         }
-        // FIX: The return type of marked.parse can be a Promise, so we cast it to a string.
         modelMessageElement.innerHTML = marked.parse(fullResponse) as string;
         hljs.highlightAll();
 
-        // Check for grounding sources
-        // FIX: The response from the stream does not have a `.response` property.
-        // Grounding metadata can be found in the chunks. We'll check the last one.
         if (lastChunk) {
             const groundingMetadata = lastChunk?.candidates?.[0]?.groundingMetadata;
             if (groundingMetadata?.groundingChunks?.length) {
@@ -262,6 +385,7 @@ async function handleSendMessage() {
         handleError(e instanceof Error ? e.message : String(e), modelMessageElement);
     } finally {
         setLoading(false);
+        updateStatus("");
     }
 }
 
@@ -279,7 +403,7 @@ async function handleGenerateImage() {
     const modelMessageElement = addMessage('model', '');
     const imageLoader = document.createElement('div');
     imageLoader.className = 'image-loader-container';
-    imageLoader.innerHTML = `<div class="image-loader-placeholder"></div><p>Generating image...</p>`;
+    imageLoader.innerHTML = `<div class="image-loader-placeholder"></div><p>Generating medical illustration...</p>`;
     modelMessageElement.appendChild(imageLoader);
 
     try {
@@ -287,7 +411,10 @@ async function handleGenerateImage() {
         const response = await ai.models.generateContent({
             model: IMAGE_MODEL,
             contents: { parts: [{ text: promptText }] },
-            config: { responseModalities: [Modality.IMAGE] },
+            config: { 
+                responseModalities: [Modality.IMAGE],
+                safetySettings: SAFETY_SETTINGS
+            },
         });
 
         const part = response.candidates?.[0]?.content?.parts?.[0];
@@ -308,6 +435,19 @@ async function handleGenerateImage() {
 
 
 // --- UI & DOM MANIPULATION ---
+function updateStatus(text: string) {
+    // Check if status indicator exists, if not create it inside input container
+    let statusEl = document.getElementById('status-indicator');
+    if (!statusEl) {
+        statusEl = document.createElement('div');
+        statusEl.id = 'status-indicator';
+        statusEl.className = 'status-indicator';
+        dom.form.inputRow.parentElement?.insertBefore(statusEl, dom.form.inputRow);
+    }
+    statusEl.textContent = text;
+    statusEl.hidden = !text;
+}
+
 function addMessage(role: 'user' | 'model', content: string, isStreaming: boolean = false): HTMLElement {
     const messageWrapper = document.createElement('div');
     messageWrapper.className = `message ${role}-message`;
@@ -315,10 +455,8 @@ function addMessage(role: 'user' | 'model', content: string, isStreaming: boolea
     const messageContent = document.createElement('div');
     messageContent.className = 'message-content';
     if (isStreaming) {
-        // FIX: The return type of marked.parse can be a Promise, so we cast it to a string.
         messageContent.innerHTML = marked.parse('▍') as string;
     } else {
-        // FIX: The return type of marked.parse can be a Promise, so we cast it to a string.
         messageContent.innerHTML = content.startsWith('<img') ? content : marked.parse(content) as string;
     }
     
@@ -366,7 +504,7 @@ function renderSources(messageElement: HTMLElement, chunks: any[]) {
 function handleError(message: string, element?: HTMLElement) {
     const targetElement = element || addMessage('model', '');
     targetElement.parentElement?.classList.add('error-message');
-    targetElement.textContent = `Error: ${message}`;
+    targetElement.textContent = `Filtered/Error: ${message}`;
 }
 
 function setLoading(loading: boolean) {
@@ -471,7 +609,6 @@ async function startVoiceInput() {
         isRecording = true;
         updateVoiceButtonState();
         
-        // Fix: Cast window to 'any' to allow access to the deprecated 'webkitAudioContext' for older browser compatibility.
         inputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: INPUT_SAMPLE_RATE });
         outputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: OUTPUT_SAMPLE_RATE });
         inputGainNode = inputAudioContext.createGain();
@@ -487,6 +624,7 @@ async function startVoiceInput() {
                 speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } } },
                 inputAudioTranscription: {},
                 outputAudioTranscription: {},
+                safetySettings: SAFETY_SETTINGS // Safety filters for Voice
             },
             callbacks: {
                 onopen: () => {
@@ -536,7 +674,6 @@ async function handleLiveMessage(message: LiveServerMessage) {
         }
         const text = message.serverContent.inputTranscription.text;
         currentInputTranscription += text;
-        // FIX: The return type of marked.parse can be a Promise, so we cast it to a string.
         userInputMessageElem.querySelector('.message-content')!.innerHTML = marked.parse(currentInputTranscription + '▍') as string;
     }
     
@@ -546,7 +683,6 @@ async function handleLiveMessage(message: LiveServerMessage) {
         }
         const text = message.serverContent.outputTranscription.text;
         currentOutputTranscription += text;
-        // FIX: The return type of marked.parse can be a Promise, so we cast it to a string.
         modelOutputMessageElem.querySelector('.message-content')!.innerHTML = marked.parse(currentOutputTranscription + '▍') as string;
     }
 
@@ -557,11 +693,9 @@ async function handleLiveMessage(message: LiveServerMessage) {
     
     if (message.serverContent?.turnComplete) {
         if (userInputMessageElem) {
-            // FIX: The return type of marked.parse can be a Promise, so we cast it to a string.
            userInputMessageElem.querySelector('.message-content')!.innerHTML = marked.parse(currentInputTranscription) as string;
         }
         if (modelOutputMessageElem) {
-            // FIX: The return type of marked.parse can be a Promise, so we cast it to a string.
            modelOutputMessageElem.querySelector('.message-content')!.innerHTML = marked.parse(currentOutputTranscription) as string;
         }
         currentInputTranscription = '';
@@ -677,7 +811,6 @@ function blobToBase64(blob: Blob): Promise<string> {
     });
 }
 
-// FIX: Update function signature to use the aliased GenAIBlob type.
 function createPcmBlob(data: Float32Array): GenAIBlob {
     const l = data.length;
     const int16 = new Int16Array(l);

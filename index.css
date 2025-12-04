@@ -19,6 +19,8 @@
   --danger-light: #ef4444;
   --danger-bg-light: #fee2e2;
   --success-light: #10b981;
+  --warning-light: #f59e0b;
+  --warning-bg-light: #fef3c7;
 }
 
 [data-theme="dark"] {
@@ -38,6 +40,8 @@
   --danger-dark: #f87171;
   --danger-bg-dark: #450a0a;
   --success-dark: #34d399;
+  --warning-dark: #fbbf24;
+  --warning-bg-dark: #78350f;
 }
 
 /* Apply variables */
@@ -58,6 +62,8 @@ body {
   --danger: var(--danger-light);
   --danger-bg: var(--danger-bg-light);
   --success: var(--success-light);
+  --warning: var(--warning-light);
+  --warning-bg: var(--warning-bg-light);
 }
 
 body[data-theme="dark"] {
@@ -77,6 +83,8 @@ body[data-theme="dark"] {
   --danger: var(--danger-dark);
   --danger-bg: var(--danger-bg-dark);
   --success: var(--success-dark);
+  --warning: var(--warning-dark);
+  --warning-bg: var(--warning-bg-dark);
 }
 
 /* --- BASE AND LAYOUT --- */
@@ -138,6 +146,7 @@ h1 {
   background-color: var(--bg-primary);
   border-top: 1px solid var(--border-color);
   flex-shrink: 0;
+  position: relative;
 }
 
 /* --- CHAT MESSAGES --- */
@@ -308,6 +317,21 @@ h1 {
 #thinking-mode-btn.active {
   background-color: var(--accent-secondary);
   color: white;
+}
+
+/* --- STATUS INDICATOR --- */
+.status-indicator {
+    padding: 0 0 8px 12px;
+    font-size: 0.75rem;
+    color: var(--accent-secondary);
+    font-weight: 500;
+    animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+    0% { opacity: 0.6; }
+    50% { opacity: 1; }
+    100% { opacity: 0.6; }
 }
 
 /* --- FILE PREVIEW --- */
